@@ -59,10 +59,11 @@ def load_model(device):
     return processor, model, dtype
 
 
-def segment(processor, model, dtype, frames_rgb):
+def segment(processor, model, dtype, frames_rgb, size):
     import torch
 
-    inputs = processor(images=frames_rgb, return_tensors="pt")
+    # the processor's default (384 x 384, aspect ratio lost) misses small, distant objects
+    inputs = processor(images=frames_rgb, size=size, return_tensors="pt")
     inputs = {k: v.to(model.device, dtype=dtype if v.is_floating_point() else v.dtype) for k, v in inputs.items()}
     with torch.no_grad():
         out = model(**inputs)
@@ -173,6 +174,8 @@ def main():
     parser.add_argument("--start", type=float, default=0, help="start time in s")
     parser.add_argument("--end", type=float, default=None, help="end time in s")
     parser.add_argument("--batch", type=int, default=4, help="frames per model call (GPU)")
+    parser.add_argument("--work-height", type=int, default=720,
+                        help="frames are scaled down to this height for the model (default 720; higher finds smaller objects, but is slower)")
     parser.add_argument("--trajectory", help="per-frame trajectory CSV exported from fix_picker.html")
     parser.add_argument("--out", type=Path, help="output folder (default data/detect/<video>)")
     parser.add_argument("--device", default=None, help="cuda or cpu (default: cuda if available)")
@@ -202,7 +205,14 @@ def main():
     first = int(args.start * fps)
     last = min(total - 1, int(args.end * fps)) if args.end else total - 1
     cap.set(cv2.CAP_PROP_POS_FRAMES, first)
-    print(f"{video.name}: {total} frames at {fps:.2f} fps, evaluating {first}..{last} every {args.step}", flush=True)
+    native_w, native_h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    work_h = min(args.work_height, native_h)
+    work_w = round(native_w * work_h / native_h)
+    scale = native_h / work_h
+    model_size = {"height": -(-work_h // 32) * 32, "width": -(-work_w // 32) * 32}
+    rail_norm = (720 / work_h) ** 2
+    print(f"{video.name}: {native_w}x{native_h}, {total} frames at {fps:.2f} fps, evaluating {first}..{last} every {args.step}; "
+          f"model input {model_size['width']}x{model_size['height']}", flush=True)
 
     det_file = open(out_dir / "detections.csv", "w", newline="", encoding="utf-8")
     det = csv.writer(det_file)
@@ -217,7 +227,7 @@ def main():
     started = time.time()
 
     def flush(batch):
-        segs = segment(processor, model, dtype, [cv2.cvtColor(b, cv2.COLOR_BGR2RGB) for _, b in batch])
+        segs = segment(processor, model, dtype, [cv2.cvtColor(b, cv2.COLOR_BGR2RGB) for _, b in batch], model_size)
         for (frame, bgr), seg in zip(batch, segs):
             t = frame / fps
             pos = lookup(trajectory, t)
@@ -227,14 +237,18 @@ def main():
             for name, x1, y1, x2, y2, area, cx, cy, elongation, tilt in found:
                 counts[name] = counts.get(name, 0) + 1
                 side = "left" if cx < width / 2 else "right"  # image side only; camera roll not compensated yet
+                # coordinates in pixels of the original video
+                x1, y1, x2, y2, cx, cy = (round(v * scale, 1) for v in (x1, y1, x2, y2, cx, cy))
+                area = int(area * scale * scale)
                 det.writerow([frame, f"{t:.3f}", name, x1, y1, x2, y2, area, f"{cx:.1f}", f"{cy:.1f}", side,
                               pos.get("station_m", ""), pos.get("lon", ""), pos.get("lat", ""), pos.get("heading_deg", ""),
                               f"{elongation:.2f}", f"{tilt:.1f}"])
             rail_ids = [i for i, n in class_ids.items() if n in RAIL_CLASSES]
             rails = np.isin(seg, rail_ids)
             top = int(rails.shape[0] * 0.3)
-            rail.writerow([frame, f"{t:.3f}", int(rails[:, : width // 2].sum()), int(rails[:, width // 2:].sum()),
-                           int(rails[top:, : int(width * 0.3)].sum()), int(rails[top:, int(width * 0.7):].sum()),
+            px = lambda m: int(m.sum() * rail_norm)  # pixel counts relative to a 720-line image
+            rail.writerow([frame, f"{t:.3f}", px(rails[:, : width // 2]), px(rails[:, width // 2:]),
+                           px(rails[top:, : int(width * 0.3)]), px(rails[top:, int(width * 0.7):]),
                            pos.get("station_m", ""), pos.get("lon", ""), pos.get("lat", "")])
             img = overlay(bgr, seg, class_ids, colours, found)
             cv2.imwrite(str(out_dir / "overlays" / f"{frame:06d}.jpg"), cv2.resize(img, (640, int(640 * img.shape[0] / width))),
@@ -247,10 +261,14 @@ def main():
 
     frame = first
     while frame <= last:
-        ok, bgr = cap.read()
-        if not ok:
+        if not cap.grab():  # skipped frames are not converted, which matters for 4K
             break
         if (frame - first) % args.step == 0:
+            ok, bgr = cap.retrieve()
+            if not ok:
+                break
+            if scale != 1:
+                bgr = cv2.resize(bgr, (work_w, work_h), interpolation=cv2.INTER_AREA)
             batch.append((frame, bgr))
             if len(batch) >= (args.batch if device == "cuda" else 1):
                 flush(batch)

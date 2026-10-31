@@ -99,6 +99,13 @@ pip install transformers opencv-python
 python tools/detect.py videos/brenner.mp4 --step 3 --trajectory data/brenner_trajectory.csv
 ```
 
+Frames are scaled to `--work-height` lines (default 720, aspect ratio kept)
+before segmentation; the model's own default of 384 x 384 misses distant
+delineator posts. 4K footage is reduced right after decoding, so it costs
+little more than 720p; a higher `--work-height` (e.g. 1080) can find even
+smaller objects at roughly proportional extra time. Coordinates in the
+results are always in pixels of the original video.
+
 Results in `data/detect/<video>/`: `detections.csv`, `guardrails.csv`
 (guardrail pixels left/right per frame), overlay images and `index.html`, a
 contact sheet that can be filtered by class; via `serve.py`
