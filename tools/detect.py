@@ -192,7 +192,8 @@ def main():
                   "image_side", "station_m", "lon", "lat", "heading_deg"])
     rail_file = open(out_dir / "guardrails.csv", "w", newline="", encoding="utf-8")
     rail = csv.writer(rail_file)
-    rail.writerow(["frame", "video_time_s", "left_px", "right_px", "station_m", "lon", "lat"])
+    # *_near_px: outer lower image parts, i.e. guardrail next to the vehicle rather than far ahead
+    rail.writerow(["frame", "video_time_s", "left_px", "right_px", "left_near_px", "right_near_px", "station_m", "lon", "lat"])
 
     frames, counts_by_frame, batch = [], {}, []
     started = time.time()
@@ -212,7 +213,9 @@ def main():
                               pos.get("station_m", ""), pos.get("lon", ""), pos.get("lat", ""), pos.get("heading_deg", "")])
             rail_ids = [i for i, n in class_ids.items() if n == "guardrail"]
             rails = np.isin(seg, rail_ids)
+            top = int(rails.shape[0] * 0.3)
             rail.writerow([frame, f"{t:.3f}", int(rails[:, : width // 2].sum()), int(rails[:, width // 2:].sum()),
+                           int(rails[top:, : int(width * 0.3)].sum()), int(rails[top:, int(width * 0.7):].sum()),
                            pos.get("station_m", ""), pos.get("lon", ""), pos.get("lat", "")])
             img = overlay(bgr, seg, class_ids, colours, found)
             cv2.imwrite(str(out_dir / "overlays" / f"{frame:06d}.jpg"), cv2.resize(img, (640, int(640 * img.shape[0] / width))),

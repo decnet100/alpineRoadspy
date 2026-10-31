@@ -105,9 +105,26 @@ contact sheet that can be filtered by class; via `serve.py`
 frame in the fix picker. The model (about 0.9 GB) is downloaded once from
 Hugging Face; Mapillary Vistas models are licensed for non-commercial use.
 
-Not done yet: tracking across frames (one row per physical object),
-compensating camera roll for the left/right decision, sign type
-classification, a dedicated delineator detector.
+### Objects
+
+`tools/track.py` links the per-frame regions into individual objects and
+places each one at the moment the camera passes it (apparent size grows
+inversely with distance: the zero of a line through 1/size over time). Station
+and coordinates come from the trajectory, the side from the direction in which
+the object leaves the image; guardrails become sections (station from–to,
+side).
+
+```bash
+python tools/track.py videos/brenner.mp4 --trajectory data/brenner_trajectory.csv
+```
+
+Results in `data/objects/<video>/`: `objects.csv`, `objects.geojson` (load it
+in the fix picker via "Referenz/Objekte…"; a click on an object jumps to the
+video shortly before passing it) and `index.html` with a thumbnail per object.
+
+Not done yet: sign type classification, telling delineator posts apart from
+other posts, compensating camera roll, estimating the lateral distance
+(currently fixed per object type).
 
 ## Layout
 

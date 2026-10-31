@@ -81,7 +81,7 @@
       <label>Fangradius <input id="snapRadius" type="number" min="1" step="any" value="15"> m</label>
     </div>
     <div class="bar">
-      <label class="btn">Referenzlinie… <input id="refFile" type="file" accept=".gpx,.geojson,.json"></label>
+      <label class="btn" title="GPX/GeoJSON-Linie oder objects.geojson aus tools/track.py">Referenz/Objekte… <input id="refFile" type="file" accept=".gpx,.geojson,.json"></label>
       <label class="btn">Fixpunkte laden… <input id="fixFile" type="file" accept=".csv,.geojson,.json"></label>
       <button id="bExportCsv">Export Fixpunkte CSV</button>
       <button id="bExportGeojson">Export GeoJSON</button>
@@ -772,14 +772,31 @@ function gpxToGeojson(text) {
   return { type: 'Feature', geometry: { type: 'MultiLineString', coordinates: lines }, properties: {} };
 }
 
+// Objects from tools/track.py (objects.geojson) are coloured by kind; a click jumps
+// in the video to shortly before the camera passes them.
+const KIND_COLOURS = { pole: '#d500f9', sign: '#ffc400', light: '#00e5ff', guardrail: '#ff6d00' };
+
 function loadReference(gj, name) {
   refLayer.clearLayers();
   L.geoJSON(gj, {
-    style: { color: '#7b1fa2', weight: 4, opacity: 0.6 },
-    pointToLayer: (f, ll) => L.circleMarker(ll, { radius: 3, color: '#7b1fa2' }),
+    style: (f) => ({ color: KIND_COLOURS[f.properties?.kind] || '#7b1fa2', weight: 4, opacity: 0.7 }),
+    bubblingMouseEvents: false,   // a click on an object must not set a fix
+    pointToLayer: (f, ll) => L.circleMarker(ll, { radius: 5, weight: 1, color: '#000', fillOpacity: 0.9, bubblingMouseEvents: false,
+                                                  fillColor: KIND_COLOURS[f.properties?.kind] || '#7b1fa2' }),
+    onEachFeature: (f, layer) => {
+      const p = f.properties || {};
+      if (p.kind) layer.bindTooltip([p.id, p.class || p.kind, p.side,
+        p.station_m != null ? `Station ${Math.round(p.station_m)} m` : '',
+        p.station_from_m != null ? `${Math.round(p.station_from_m)}–${Math.round(p.station_to_m)} m` : ''].filter(Boolean).join(' · '));
+      if (p.video_time_s != null) layer.on('click', (e) => {
+        L.DomEvent.stopPropagation(e);
+        video.pause();
+        video.currentTime = Math.max(0, p.video_time_s - 1.5);
+      });
+    },
   }).addTo(refLayer);
   if (refLayer.getLayers().length) map.fitBounds(refLayer.getBounds().pad(0.1));
-  status(`Referenzlinie ${name} geladen.`);
+  status(`Referenz ${name} geladen.`);
 }
 
 function loadFixes(list, name) {
