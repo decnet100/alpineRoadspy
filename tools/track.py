@@ -154,32 +154,43 @@ def side_of(tr, width):
     return "right" if tr[-1]["cx"] > width / 2 else "left"
 
 
-def guardrail_sections(rows, traj, min_px, min_len, max_gap_m):
-    """Sections (station from/to, side) where a guardrail is seen in the near field."""
+def guardrail_sections(rows, traj, min_px, min_len, max_gap_m, lead_m):
+    """Sections (station from/to, side) with a guardrail.
+
+    A section lasts as long as a guardrail is seen anywhere on that image side;
+    the near part next to the vehicle is often hidden behind the cockpit. It
+    starts where the guardrail first shows up in the near field (detect.py
+    *_near_px), because further ahead it is visible long before it is reached;
+    without near-field values the start is shifted by `lead_m` instead.
+    """
     near = "left_near_px" in rows[0]
+    smooth = lambda f: np.array([np.median(f[max(0, i - 2): i + 3]) for i in range(len(f))]) if len(f) >= 5 else f
     sections = []
     for side in ("left", "right"):
-        col = f"{side}_near_px" if near else f"{side}_px"
-        pts = []
-        for r in rows:
-            t = float(r["video_time_s"])
-            if traj.covers(t):
-                pts.append((traj.at(t)["station"], float(r[col]) >= min_px))
-        pts.sort()
-        flags = np.array([f for _, f in pts], dtype=float)
-        if len(flags) >= 5:  # median filter against single-frame dropouts
-            flags = np.array([np.median(flags[max(0, i - 2): i + 3]) for i in range(len(flags))])
-        start = end = None
-        for (st, _), f in zip(pts, flags):
-            if f >= 0.5:
-                if start is not None and st - end > max_gap_m:
-                    sections.append((start, end, side))
-                    start = None
-                start = st if start is None else start
-                end = st
-        if start is not None:
-            sections.append((start, end, side))
-    return [s for s in sections if s[1] - s[0] >= min_len], near
+        pts = sorted((traj.at(float(r["video_time_s"]))["station"], float(r[f"{side}_px"]) >= min_px,
+                      near and float(r[f"{side}_near_px"]) >= min_px / 3)
+                     for r in rows if traj.covers(float(r["video_time_s"])))
+        if not pts:
+            continue
+        stations = [p[0] for p in pts]
+        seen = smooth(np.array([p[1] for p in pts], dtype=float)) >= 0.5   # median filter against dropouts
+        close = smooth(np.array([p[2] for p in pts], dtype=float)) >= 0.5
+        runs, first = [], None
+        for i, st in enumerate(stations):
+            if seen[i]:
+                if first is not None and st - stations[last] > max_gap_m:
+                    runs.append((first, last))
+                    first = None
+                first = i if first is None else first
+                last = i
+        if first is not None:
+            runs.append((first, last))
+        for a, b in runs:
+            close_idx = [i for i in range(a, b + 1) if close[i]]
+            begin = stations[close_idx[0]] if close_idx else min(stations[a] + lead_m, stations[b])
+            if stations[b] - begin >= min_len:
+                sections.append((begin, stations[b], side))
+    return sections, near
 
 
 def thumbnails(video, objects, out_dir):
@@ -270,6 +281,8 @@ def main():
     parser.add_argument("--min-hits", type=int, default=3, help="minimum detections per object (default 3)")
     parser.add_argument("--max-gap", type=int, default=2, help="evaluated frames an object may be missed (default 2)")
     parser.add_argument("--rail-px", type=int, default=1500, help="guardrail pixels per image side counted as present (near field: a third)")
+    parser.add_argument("--rail-lead", type=float, default=20,
+                        help="without near-field values: metres a guardrail is seen before it is reached (default 20)")
     parser.add_argument("--road-width", type=float, default=6.5, help="carriageway width in m (default 6.5)")
     parser.add_argument("--pole-min-elongation", type=float, default=3.0,
                         help="poles less elongated than this (major/minor axis) are uncertain (default 3)")
@@ -353,9 +366,8 @@ def main():
     if args.guardrails and not rail_path.exists():
         raise SystemExit(f"Guardrail file not found: {rail_path}")
     rail_rows = read_csv(rail_path) if rail_path.exists() else []
-    near = bool(rail_rows) and "left_near_px" in rail_rows[0]
-    rail_px = args.rail_px // 3 if near else args.rail_px
-    sections, near = guardrail_sections(rail_rows, traj, rail_px, min_len=20, max_gap_m=15) if rail_rows else ([], False)
+    sections, near = guardrail_sections(rail_rows, traj, args.rail_px, min_len=20, max_gap_m=15,
+                                        lead_m=args.rail_lead) if rail_rows else ([], False)
 
     with open(out_dir / "objects.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -403,7 +415,7 @@ def main():
     if not rail_rows:
         print(f"No guardrails: {rail_path} not found")
     else:
-        print(f"Guardrail sections from {rail_path} ({'near field' if near else 'whole image half – rerun detect.py for near-field values'}): "
+        print(f"Guardrail sections from {rail_path} ({'start from near field' if near else 'whole image half – rerun detect.py for near-field values'}): "
               + (", ".join(f"{s:.0f}-{e:.0f} m {side}" for s, e, side in sections) or "none"))
     if not traj.has_offset:
         print("Note: trajectory has no offset_m column (export it again from the fix picker); "
