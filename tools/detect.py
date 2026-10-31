@@ -70,18 +70,32 @@ def segment(processor, model, dtype, frames_rgb):
     return [s.cpu().numpy() for s in processor.post_process_semantic_segmentation(out, target_sizes=sizes)]
 
 
+def shape(component):
+    """Elongation (major/minor axis, independent of image rotation) and tilt of the
+    major axis from vertical in degrees, from the second moments of a region mask."""
+    m = cv2.moments(component, binaryImage=True)
+    if m["m00"] == 0:
+        return 1.0, 0.0
+    a, b, c = m["mu20"] / m["m00"], m["mu11"] / m["m00"], m["mu02"] / m["m00"]
+    root = np.sqrt(((a - c) / 2) ** 2 + b ** 2)
+    major, minor = (a + c) / 2 + root, max((a + c) / 2 - root, 1e-6)
+    tilt = np.degrees(0.5 * np.arctan2(2 * b, a - c))  # angle of the major axis from the x axis
+    return float(np.sqrt(major / minor)), float(((tilt - 90) + 90) % 180 - 90)
+
+
 def regions(seg, class_ids):
-    """Connected regions per class of interest: (class, x1, y1, x2, y2, area, cx, cy)."""
+    """Connected regions per class of interest: (class, x1, y1, x2, y2, area, cx, cy, elongation, tilt)."""
     found = []
     for vistas_id, name in class_ids.items():
         mask = (seg == vistas_id).astype(np.uint8)
         if not mask.any():
             continue
-        n, _, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
         for i in range(1, n):
             x, y, w, h, area = stats[i]
             if area >= MIN_AREA.get(name, DEFAULT_MIN_AREA):
-                found.append((name, x, y, x + w - 1, y + h - 1, int(area), *centroids[i]))
+                elongation, tilt = shape((labels[y:y + h, x:x + w] == i).astype(np.uint8))
+                found.append((name, x, y, x + w - 1, y + h - 1, int(area), *centroids[i], elongation, tilt))
     return found
 
 
@@ -193,7 +207,7 @@ def main():
     det_file = open(out_dir / "detections.csv", "w", newline="", encoding="utf-8")
     det = csv.writer(det_file)
     det.writerow(["frame", "video_time_s", "class", "x1", "y1", "x2", "y2", "area_px", "cx", "cy",
-                  "image_side", "station_m", "lon", "lat", "heading_deg"])
+                  "image_side", "station_m", "lon", "lat", "heading_deg", "elongation", "tilt_deg"])
     rail_file = open(out_dir / "guardrails.csv", "w", newline="", encoding="utf-8")
     rail = csv.writer(rail_file)
     # *_near_px: outer lower image parts, i.e. guardrail next to the vehicle rather than far ahead
@@ -210,11 +224,12 @@ def main():
             found = regions(seg, class_ids)
             width = bgr.shape[1]
             counts = {}
-            for name, x1, y1, x2, y2, area, cx, cy in found:
+            for name, x1, y1, x2, y2, area, cx, cy, elongation, tilt in found:
                 counts[name] = counts.get(name, 0) + 1
                 side = "left" if cx < width / 2 else "right"  # image side only; camera roll not compensated yet
                 det.writerow([frame, f"{t:.3f}", name, x1, y1, x2, y2, area, f"{cx:.1f}", f"{cy:.1f}", side,
-                              pos.get("station_m", ""), pos.get("lon", ""), pos.get("lat", ""), pos.get("heading_deg", "")])
+                              pos.get("station_m", ""), pos.get("lon", ""), pos.get("lat", ""), pos.get("heading_deg", ""),
+                              f"{elongation:.2f}", f"{tilt:.1f}"])
             rail_ids = [i for i, n in class_ids.items() if n in RAIL_CLASSES]
             rails = np.isin(seg, rail_ids)
             top = int(rails.shape[0] * 0.3)

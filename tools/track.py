@@ -205,14 +205,27 @@ def thumbnails(video, objects, out_dir):
         cv2.imwrite(str(out_dir / "thumbs" / f"{o['id']}.jpg"), crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
 
+REASON_TEXT = {"not_slender": "nicht schlank", "never_near": "nie nah passiert"}
+
+
+def image_height(video):
+    try:
+        import cv2
+        cap = cv2.VideoCapture(str(video))
+        return int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or None
+    except Exception:
+        return None
+
+
 def write_index(out_dir, video_url, objects, sections, has_thumbs):
     picker = Path(os.path.relpath(ROOT / "tools" / "fix_picker.html", out_dir)).as_posix()
 
     def cell(o):
         link = f"{picker}?video={html.escape(video_url)}&amp;t={max(0, o['t_pass'] - 1.5):.2f}" if video_url else "#"
         img = f'<img loading="lazy" src="thumbs/{o["id"]}.jpg">' if has_thumbs else ""
-        return (f'<a class="cell g-{o["group"]}" href="{link}" target="_blank">{img}<div><b>{o["id"]}</b> {o["class"]}<br>'
-                f'Station {o["station"]:.0f} m · {o["side"]} · {o["hits"]}× · {o["t_pass"]:.1f} s</div></a>')
+        why = f'<br><i>unsicher: {", ".join(REASON_TEXT[r] for r in o["reasons"])}</i>' if o["reasons"] else ""
+        return (f'<a class="cell g-{o["group"]} s-{o["status"]}" href="{link}" target="_blank">{img}<div><b>{o["id"]}</b> {o["class"]}<br>'
+                f'Station {o["station"]:.0f} m · {o["side"]} · {o["hits"]}× · {o["t_pass"]:.1f} s{why}</div></a>')
 
     rails = "".join(f"<li>{s:.0f}–{e:.0f} m {side}</li>" for s, e, side in sections)
     page = f"""<!doctype html><html lang="de"><head><meta charset="utf-8"><title>Objekte</title>
@@ -223,18 +236,26 @@ body {{ font: 13px system-ui, sans-serif; margin: 10px; }}
 .cell img {{ display: block; max-width: 170px; height: 120px; object-fit: contain; background: #000; margin: auto; }}
 .cell div {{ padding: 3px 5px; font-size: 12px; }}
 .g-sign {{ border-color: #e6b800; }} .g-light {{ border-color: #00b3b3; }}
+.s-uncertain {{ opacity: .5; border-style: dashed; }}
 .hide {{ display: none; }}
 </style></head><body>
-<h3>{len(objects)} Objekte</h3>
+<h3>{len(objects)} Objekte, davon {sum(o["status"] == "uncertain" for o in objects)} unsicher</h3>
 <p>Zeigen: <label><input type="checkbox" value="pole" checked> Pfosten</label>
 <label><input type="checkbox" value="sign" checked> Schilder</label>
 <label><input type="checkbox" value="light" checked> Laternen</label>
+· <label><input type="checkbox" value="uncertain" checked> unsichere</label>
 · Klick öffnet die Stelle 1,5 s vor dem Passieren im Fixpunkt-Tool.</p>
 <div class="grid">{''.join(cell(o) for o in objects)}</div>
 <h4>Leitschienen</h4><ul>{rails or '<li>keine</li>'}</ul>
 <script>
-document.querySelectorAll('input').forEach((b) => b.onchange = () =>
-  document.querySelectorAll('.g-' + b.value).forEach((c) => c.classList.toggle('hide', !b.checked)));
+const boxes = [...document.querySelectorAll('input')];
+boxes.forEach((b) => b.onchange = () => {{
+  const on = Object.fromEntries(boxes.map((x) => [x.value, x.checked]));
+  document.querySelectorAll('.cell').forEach((c) => {{
+    const group = [...c.classList].find((k) => k.startsWith('g-')).slice(2);
+    c.classList.toggle('hide', !on[group] || (c.classList.contains('s-uncertain') && !on.uncertain));
+  }});
+}});
 </script></body></html>"""
     (out_dir / "index.html").write_text(page, encoding="utf-8")
 
@@ -250,6 +271,10 @@ def main():
     parser.add_argument("--max-gap", type=int, default=2, help="evaluated frames an object may be missed (default 2)")
     parser.add_argument("--rail-px", type=int, default=1500, help="guardrail pixels per image side counted as present (near field: a third)")
     parser.add_argument("--road-width", type=float, default=6.5, help="carriageway width in m (default 6.5)")
+    parser.add_argument("--pole-min-elongation", type=float, default=3.0,
+                        help="poles less elongated than this (major/minor axis) are uncertain (default 3)")
+    parser.add_argument("--pole-min-height", type=float, default=0.06,
+                        help="poles never taller than this share of the image height are uncertain (default 0.06)")
     parser.add_argument("--no-thumbs", action="store_true")
     args = parser.parse_args()
 
@@ -267,10 +292,16 @@ def main():
         x1, y1, x2, y2 = (float(r[k]) for k in ("x1", "y1", "x2", "y2"))
         dets.append({"frame": int(r["frame"]), "t": float(r["video_time_s"]), "class": r["class"],
                      "group": GROUPS[r["class"]], "x1": x1, "y1": y1, "x2": x2, "y2": y2,
-                     "cx": float(r["cx"]), "cy": float(r["cy"]), "size": math.hypot(x2 - x1 + 1, y2 - y1 + 1)})
+                     "cx": float(r["cx"]), "cy": float(r["cy"]), "size": math.hypot(x2 - x1 + 1, y2 - y1 + 1),
+                     # rotation-invariant elongation from detect.py; older files: bounding box aspect
+                     "elongation": float(r["elongation"]) if r.get("elongation") else
+                                   max(x2 - x1 + 1, y2 - y1 + 1) / min(x2 - x1 + 1, y2 - y1 + 1)})
     frames = sorted({d["frame"] for d in dets})
     step = int(np.median(np.diff(frames))) if len(frames) > 1 else 1
     width = max(d["x2"] for d in dets) + 1
+    height = image_height(video) or max(d["y2"] for d in dets) + 1
+    has_elongation = "elongation" in read_csv(det_path)[0]
+    min_elongation = args.pole_min_elongation if has_elongation else 1.5
 
     objects = []
     for group in sorted({d["group"] for d in dets}):
@@ -280,9 +311,12 @@ def main():
             t_pass, fitted = pass_time(tr)
             if not traj.covers(t_pass):
                 continue
+            largest = sorted(tr, key=lambda d: d["size"])[-3:]
             objects.append({"group": group, "class": Counter(d["class"] for d in tr).most_common(1)[0][0], "hits": len(tr),
                             "t_first": tr[0]["t"], "t_last": tr[-1]["t"], "t_pass": t_pass, "fitted": fitted,
-                            "side": side_of(tr, width), "best": max(tr, key=lambda d: d["size"])})
+                            "side": side_of(tr, width), "best": largest[-1],
+                            "max_height": max(d["y2"] - d["y1"] + 1 for d in tr),
+                            "elongation": float(np.median([d["elongation"] for d in largest]))})
 
     # fragments of one object (detection dropouts) pass at nearly the same time on the same side
     objects.sort(key=lambda o: (o["group"], o["side"], o["t_pass"]))
@@ -293,10 +327,22 @@ def main():
             keep = prev if prev["hits"] >= o["hits"] else o
             keep["hits"] = prev["hits"] + o["hits"]
             keep["best"] = max(prev["best"], o["best"], key=lambda d: d["size"])
+            keep["max_height"] = max(prev["max_height"], o["max_height"])
             merged[-1] = keep
         else:
             merged.append(o)
     objects = sorted(merged, key=lambda o: o["t_pass"])
+
+    # plausibility of pole candidates: delineator posts are slender and are passed closely
+    for o in objects:
+        reasons = []
+        if o["group"] == "pole":
+            if o["elongation"] < min_elongation:
+                reasons.append("not_slender")
+            if o["max_height"] < args.pole_min_height * height:
+                reasons.append("never_near")
+        o["reasons"] = reasons
+        o["status"] = "uncertain" if reasons else "ok"
 
     for i, o in enumerate(objects, 1):
         p = traj.at(o["t_pass"])
@@ -313,16 +359,17 @@ def main():
 
     with open(out_dir / "objects.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["id", "group", "class", "station_m", "side", "lon", "lat", "axis_dist_m", "pass_time_s",
-                    "first_seen_s", "last_seen_s", "hits", "pass_from_size"])
+        w.writerow(["id", "group", "class", "status", "reasons", "station_m", "side", "lon", "lat", "axis_dist_m", "pass_time_s",
+                    "first_seen_s", "last_seen_s", "hits", "pass_from_size", "max_height_px", "elongation"])
         for o in objects:
-            w.writerow([o["id"], o["group"], o["class"], f"{o['station']:.1f}", o["side"], f"{o['lon']:.7f}",
+            w.writerow([o["id"], o["group"], o["class"], o["status"], " ".join(o["reasons"]), f"{o['station']:.1f}", o["side"], f"{o['lon']:.7f}",
                         f"{o['lat']:.7f}", f"{o['axis_dist']:.2f}", f"{o['t_pass']:.2f}", f"{o['t_first']:.2f}",
-                        f"{o['t_last']:.2f}", o["hits"], int(o["fitted"])])
+                        f"{o['t_last']:.2f}", o["hits"], int(o["fitted"]), o["max_height"], f"{o['elongation']:.1f}"])
 
     features = [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [round(o["lon"], 7), round(o["lat"], 7)]},
                  "properties": {"id": o["id"], "kind": o["group"], "class": o["class"], "station_m": round(o["station"], 1),
-                                "side": o["side"], "video_time_s": round(o["t_pass"], 2), "hits": o["hits"]}}
+                                "side": o["side"], "video_time_s": round(o["t_pass"], 2), "hits": o["hits"],
+                                "status": o["status"], "reasons": " ".join(o["reasons"])}}
                 for o in objects]
     for start, end, side in sections:
         sts = np.linspace(start, end, max(2, int((end - start) / 5) + 1))
@@ -349,6 +396,10 @@ def main():
     for o in objects:
         counts[o["class"]] = counts.get(o["class"], 0) + 1
     print(f"{len(dets)} detections (step {step}) -> {len(objects)} objects: {counts}")
+    flagged = Counter(r for o in objects for r in o["reasons"])
+    print(f"Uncertain poles: {sum(o['status'] == 'uncertain' for o in objects)} of {sum(o['group'] == 'pole' for o in objects)} "
+          f"({', '.join(f'{k}: {v}' for k, v in flagged.items())})"
+          + ("" if has_elongation else " – shape from bounding boxes; rerun detect.py for rotation-invariant values"))
     if not rail_rows:
         print(f"No guardrails: {rail_path} not found")
     else:

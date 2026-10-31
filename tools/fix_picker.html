@@ -785,11 +785,13 @@ function loadReference(gj, name) {
   L.geoJSON(gj, {
     style: (f) => ({ color: KIND_COLOURS[f.properties?.kind] || '#7b1fa2', weight: 4, opacity: 0.7 }),
     bubblingMouseEvents: false,   // a click on an object must not set a fix
-    pointToLayer: (f, ll) => L.circleMarker(ll, { radius: 5, weight: 1, color: '#000', fillOpacity: 0.9, bubblingMouseEvents: false,
+    // uncertain candidates (track.py plausibility check) are drawn hollow
+    pointToLayer: (f, ll) => L.circleMarker(ll, { radius: 5, weight: 1, color: '#000', bubblingMouseEvents: false,
+                                                  fillOpacity: f.properties?.status === 'uncertain' ? 0.15 : 0.9,
                                                   fillColor: KIND_COLOURS[f.properties?.kind] || '#7b1fa2' }),
     onEachFeature: (f, layer) => {
       const p = f.properties || {};
-      if (p.kind) layer.bindTooltip([p.id, p.class || p.kind, p.side,
+      if (p.kind) layer.bindTooltip([p.id, p.class || p.kind, p.side, p.status === 'uncertain' ? `unsicher (${p.reasons})` : '',
         p.station_m != null ? `Station ${Math.round(p.station_m)} m` : '',
         p.station_from_m != null ? `${Math.round(p.station_from_m)}–${Math.round(p.station_to_m)} m` : ''].filter(Boolean).join(' · '));
       if (p.video_time_s != null) layer.on('click', (e) => {

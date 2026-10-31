@@ -129,9 +129,18 @@ sides alike. The camera's offset from the axis comes from the trajectory
 (`offset_m`); older trajectory exports without it assume the middle of the
 right lane.
 
-Not done yet: sign type classification, telling delineator posts apart from
-other posts, compensating camera roll, measuring the lateral distance per
-object instead of assuming it.
+Pole candidates get a plausibility check: delineator posts are slender and
+are passed closely, so candidates with a rotation-invariant elongation below
+`--pole-min-elongation` (default 3) or never taller than `--pole-min-height`
+(default 6 % of the image height) are kept but marked `uncertain` (column
+`status`, reason in `reasons`; hollow on the map, dashed in `index.html`).
+Detections from older detect.py runs only have bounding boxes, so the
+elongation falls back to the box aspect (threshold 1.5).
+
+Not done yet: sign type classification, separating delineator posts from other
+slender posts (tree trunks, guardrail posts in shade – brightness did not
+separate them reliably; a trained classifier is the next step), compensating
+camera roll, measuring the lateral distance per object instead of assuming it.
 
 ## Layout
 
