@@ -471,7 +471,8 @@ function buildExtension(fixes, routes) {
     coords = [[b.lat, b.lon], [b.lat + dir[1] * length / k, b.lon + dir[0] * length / (k * cos)]];
   }
   if (coords.length < 2) return null;
-  return { path: new RoadNet.Path(coords), speed, t0: b.t, station0: b.station, offset: r.ok ? r.offB : 0 };
+  return { path: new RoadNet.Path(coords), speed, t0: b.t, station0: b.station, offset: r.ok ? r.offB : 0,
+           onRoad: r.ok && !!b.snap };
 }
 
 let routeGen = 0, routeTimer = null;
@@ -540,15 +541,17 @@ function position(t) {
     }
     const r = routes[i - 1];
     const s = w * r.path.length;
-    const p = r.path.at(s, r.offA + w * (r.offB - r.offA));
+    const off = r.offA + w * (r.offB - r.offA);   // lateral offset from the road axis, left positive
+    const p = r.path.at(s, off);
     return Object.assign(p, { station: a.station + s, speed: b.t > a.t ? r.path.length / (b.t - a.t) : 0,
-                              mode: r.ok ? 'interpoliert' : 'Luftlinie' });
+                              offset: r.ok ? off : null, mode: r.ok ? 'interpoliert' : 'Luftlinie' });
   }
   const ext = state.ext;
   if (!ext) return null;
   const s = ext.speed * (t - ext.t0);
   const p = ext.path.at(s, ext.offset);
   return Object.assign(p, { station: ext.station0 + Math.min(s, ext.path.length), speed: ext.speed,
+                            offset: ext.onRoad ? ext.offset : null,
                             mode: s > ext.path.length ? 'extrapoliert (Ende des Netzes)' : 'extrapoliert' });
 }
 
@@ -714,7 +717,8 @@ function toGeojson() {
 }
 
 function toTrajectoryCsv() {
-  const rows = ['frame,video_time_s,lon,lat,station_m,heading_deg,speed_kmh,mode'];
+  // offset_m: lateral position of the camera relative to the road axis (left positive), empty if unknown
+  const rows = ['frame,video_time_s,lon,lat,station_m,heading_deg,speed_kmh,mode,offset_m'];
   if (state.fixes.length < 2) return null;
   const end = isFinite(video.duration) ? video.duration : state.fixes[state.fixes.length - 1].t;
   for (let f = frameOf(state.fixes[0].t); (f + 0.5) / fps() <= end; f++) {
@@ -722,7 +726,7 @@ function toTrajectoryCsv() {
     const p = position(t);
     if (!p) continue;
     rows.push([f, t.toFixed(3), p.lon.toFixed(7), p.lat.toFixed(7), num(p.station, 1), num(p.heading, 1),
-               num(p.speed * 3.6, 1), p.mode].join(','));
+               num(p.speed * 3.6, 1), p.mode, num(p.offset, 2)].join(','));
   }
   return rows.join('\n') + '\n';
 }

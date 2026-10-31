@@ -6,7 +6,8 @@ camera passes it: the apparent size of an object grows inversely with its
 distance, so a straight line through 1/size over time hits zero when the
 camera is level with it. Station and coordinates at that moment come from the
 per-frame trajectory of the fix picker; the side from the direction in which
-the object leaves the image.
+the object leaves the image. Objects are placed beside the road axis (half the
+carriageway width plus an assumed distance from the edge per object type).
 
     python tools/track.py videos/brenner.mp4 --trajectory data/brenner_trajectory.csv
 
@@ -38,7 +39,8 @@ GROUPS = {
     "traffic_sign": "sign", "traffic_sign_back": "sign", "sign_frame": "sign",
     "street_light": "light",
 }
-LATERAL_M = {"pole": 2.5, "sign": 3.0, "light": 3.0}  # assumed distance from the driving line
+# assumed distance from the edge of the carriageway; objects are placed from the road axis
+EDGE_M = {"pole": 1.0, "sign": 1.5, "light": 1.5, "guardrail": 0.5}
 MERGE_S = 0.6  # same group and side passed within this time: one object
 
 
@@ -57,6 +59,9 @@ class Trajectory:
         self.lat = np.array([float(r["lat"]) for r in rows])
         self.station = np.array([float(r["station_m"] or "nan") for r in rows])
         self.heading = np.array([float(r["heading_deg"] or "nan") for r in rows])
+        # camera offset from the road axis (left positive); older exports lack the column
+        self.offset = np.array([float(r.get("offset_m") or "nan") for r in rows])
+        self.has_offset = bool(np.isfinite(self.offset).any())
 
     def covers(self, t):
         return self.t[0] - 0.5 <= t <= self.t[-1] + 0.5
@@ -66,7 +71,7 @@ class Trajectory:
         w = float(np.clip((t - self.t[i - 1]) / max(self.t[i] - self.t[i - 1], 1e-9), 0, 1))
         lerp = lambda a: a[i - 1] + w * (a[i] - a[i - 1])
         return {"lon": lerp(self.lon), "lat": lerp(self.lat), "station": lerp(self.station),
-                "heading": self.heading[i if w > 0.5 else i - 1]}
+                "heading": self.heading[i if w > 0.5 else i - 1], "offset": lerp(self.offset)}
 
 
 def offset(lon, lat, heading_deg, side, metres):
@@ -75,6 +80,21 @@ def offset(lon, lat, heading_deg, side, metres):
     dlat = metres * math.cos(ang) / 111320
     dlon = metres * math.sin(ang) / (111320 * math.cos(math.radians(lat)))
     return lon + dlon, lat + dlat
+
+
+def place(p, side, edge_m, road_width):
+    """Coordinates of an object beside the road axis: half the carriageway plus `edge_m`.
+
+    The trajectory point is the camera; its offset from the axis comes from the
+    trajectory or, if unknown, is assumed to be the middle of the right lane.
+    Returns lon, lat, distance from the axis.
+    """
+    from_axis = road_width / 2 + edge_m
+    target = from_axis if side == "left" else -from_axis  # left of the axis positive
+    camera = p["offset"] if np.isfinite(p["offset"]) else -road_width / 4
+    shift = target - camera
+    lon, lat = offset(p["lon"], p["lat"], p["heading"], "left" if shift > 0 else "right", abs(shift))
+    return lon, lat, from_axis
 
 
 def track(dets, step, max_gap):
@@ -229,6 +249,7 @@ def main():
     parser.add_argument("--min-hits", type=int, default=3, help="minimum detections per object (default 3)")
     parser.add_argument("--max-gap", type=int, default=2, help="evaluated frames an object may be missed (default 2)")
     parser.add_argument("--rail-px", type=int, default=1500, help="guardrail pixels per image side counted as present (near field: a third)")
+    parser.add_argument("--road-width", type=float, default=6.5, help="carriageway width in m (default 6.5)")
     parser.add_argument("--no-thumbs", action="store_true")
     args = parser.parse_args()
 
@@ -281,8 +302,7 @@ def main():
         p = traj.at(o["t_pass"])
         o["id"] = f"{o['group'][0].upper()}{i:04d}"
         o["station"] = p["station"]
-        o["lateral"] = LATERAL_M[o["group"]]
-        o["lon"], o["lat"] = offset(p["lon"], p["lat"], p["heading"], o["side"], o["lateral"])
+        o["lon"], o["lat"], o["axis_dist"] = place(p, o["side"], EDGE_M[o["group"]], args.road_width)
 
     if args.guardrails and not rail_path.exists():
         raise SystemExit(f"Guardrail file not found: {rail_path}")
@@ -293,11 +313,11 @@ def main():
 
     with open(out_dir / "objects.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["id", "group", "class", "station_m", "side", "lon", "lat", "lateral_m", "pass_time_s",
+        w.writerow(["id", "group", "class", "station_m", "side", "lon", "lat", "axis_dist_m", "pass_time_s",
                     "first_seen_s", "last_seen_s", "hits", "pass_from_size"])
         for o in objects:
             w.writerow([o["id"], o["group"], o["class"], f"{o['station']:.1f}", o["side"], f"{o['lon']:.7f}",
-                        f"{o['lat']:.7f}", o["lateral"], f"{o['t_pass']:.2f}", f"{o['t_first']:.2f}",
+                        f"{o['lat']:.7f}", f"{o['axis_dist']:.2f}", f"{o['t_pass']:.2f}", f"{o['t_first']:.2f}",
                         f"{o['t_last']:.2f}", o["hits"], int(o["fitted"])])
 
     features = [{"type": "Feature", "geometry": {"type": "Point", "coordinates": [round(o["lon"], 7), round(o["lat"], 7)]},
@@ -310,7 +330,7 @@ def main():
         coords = []
         for k in idx:
             p = traj.at(traj.t[int(round(k))])
-            coords.append([round(c, 7) for c in offset(p["lon"], p["lat"], p["heading"], side, 3.5)])
+            coords.append([round(c, 7) for c in place(p, side, EDGE_M["guardrail"], args.road_width)[:2]])
         features.append({"type": "Feature", "geometry": {"type": "LineString", "coordinates": coords},
                          "properties": {"kind": "guardrail", "side": side, "station_from_m": round(start, 1),
                                         "station_to_m": round(end, 1)}})
@@ -334,6 +354,9 @@ def main():
     else:
         print(f"Guardrail sections from {rail_path} ({'near field' if near else 'whole image half – rerun detect.py for near-field values'}): "
               + (", ".join(f"{s:.0f}-{e:.0f} m {side}" for s, e, side in sections) or "none"))
+    if not traj.has_offset:
+        print("Note: trajectory has no offset_m column (export it again from the fix picker); "
+              "camera assumed in the middle of the right lane")
     print(f"Wrote {out_dir}")
 
 

@@ -76,7 +76,8 @@ dialog or drag & drop. Map tiles and the WFS fallback need internet access.
   `video_time_s,frame,lon,lat,sigma_m,note,station_m,offset_m,road`
 - `<video>_fixes.geojson` — fixes plus the routed path between them
 - `<video>_trajectory.csv` — position for every frame:
-  `frame,video_time_s,lon,lat,station_m,heading_deg,speed_kmh,mode`
+  `frame,video_time_s,lon,lat,station_m,heading_deg,speed_kmh,mode,offset_m`
+  (`offset_m`: camera position relative to the road axis, left positive)
 
 ## Detecting roadside features (first pass)
 
@@ -122,9 +123,15 @@ Results in `data/objects/<video>/`: `objects.csv`, `objects.geojson` (load it
 in the fix picker via "Referenz/Objekte…"; a click on an object jumps to the
 video shortly before passing it) and `index.html` with a thumbnail per object.
 
+Objects are placed beside the road axis: half the carriageway (`--road-width`,
+default 6.5 m) plus an assumed distance from the edge per object type, on both
+sides alike. The camera's offset from the axis comes from the trajectory
+(`offset_m`); older trajectory exports without it assume the middle of the
+right lane.
+
 Not done yet: sign type classification, telling delineator posts apart from
-other posts, compensating camera roll, estimating the lateral distance
-(currently fixed per object type).
+other posts, compensating camera roll, measuring the lateral distance per
+object instead of assuming it.
 
 ## Layout
 
