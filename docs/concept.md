@@ -18,7 +18,7 @@ offset (lane, ±2–3 m).
 | Input | Format | Notes |
 |---|---|---|
 | Video | MP4/MOV | single forward-facing camera, fixed mount |
-| Position fixes | CSV: `video_time_s, x, y, sigma_m` | manual, sparse (start/end, ~60 s), ±5 m |
+| Position fixes | CSV: `video_time_s, frame, lon, lat, sigma_m, note` (WGS84) | manual, sparse (start/end, ~60 s), ±5 m; set with `tools/fix_picker.html` |
 | Reference centerline | GeoPackage/GeoJSON/GPX line | optional, may be inaccurate or have gaps |
 | Terrain model | GeoTIFF (ALS DTM, e.g. 1 m Austria) | optional, for height profile and centerline refinement |
 | Camera calibration | YAML (intrinsics, distortion) | one-off checkerboard calibration |
@@ -97,6 +97,8 @@ Additionally: the estimated camera trajectory per frame.
 - low-texture rock walls, snow
 - steep grades and tight hairpins (large rotation, little translation)
 - rolling shutter on consumer cameras
+- helmet/motorcycle cameras (first test clip): strong roll in curves and
+  head movements, so the camera is not rigidly aligned with the vehicle
 
 ## Next steps
 

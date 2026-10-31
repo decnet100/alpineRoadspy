@@ -219,11 +219,27 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# alpineRoadspy: local data, footage and model weights stay out of git
+# alpineRoadspy: footage, extracted frames, local data and model weights
+# never go into the (public) repo
 data/
+videos/
+frames/
+runs/
 *.mp4
 *.MP4
 *.mov
 *.MOV
+*.avi
+*.mkv
+*.jpg
+*.jpeg
+*.JPG
+*.JPEG
+*.png
+*.PNG
+*.tif
+*.tiff
 *.pt
-runs/
+# images explicitly meant for documentation are allowed
+!docs/**/*.png
+!docs/**/*.jpg

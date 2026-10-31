@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>alpineRoadspy – Fixpunkte</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<style>
+  html, body { margin: 0; height: 100%; font: 13px system-ui, sans-serif; color: #222; }
+  #app { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); height: 100vh; }
+  #left { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid #bbb; }
+  #videoWrap { position: relative; background: #000; }
+  video { display: block; width: 100%; max-height: 58vh; background: #000; }
+  #dropHint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+              color: #aaa; font-size: 15px; text-align: center; padding: 20px; pointer-events: none; }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 5px 8px; border-bottom: 1px solid #ddd; }
+  #seek { width: 100%; margin: 0; }
+  button, label.btn { font: inherit; padding: 3px 8px; border: 1px solid #aaa; border-radius: 3px;
+                      background: #f4f4f4; cursor: pointer; white-space: nowrap; }
+  button:hover, label.btn:hover { background: #e6e6e6; }
+  label.btn input { display: none; }
+  #time { font-family: ui-monospace, monospace; min-width: 21ch; }
+  input[type=number] { width: 5em; }
+  #fixTableWrap { flex: 1 1 auto; overflow: auto; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { padding: 2px 6px; border-bottom: 1px solid #eee; text-align: right; white-space: nowrap; }
+  th { position: sticky; top: 0; background: #f7f7f7; font-weight: 600; }
+  td.note, th.note { text-align: left; width: 100%; }
+  td input { font: inherit; width: 100%; box-sizing: border-box; border: 1px solid transparent; background: transparent; }
+  td input:focus, td input:hover { border-color: #aaa; background: #fff; }
+  td input.sigma { width: 4.5em; text-align: right; }
+  tr.sel td { background: #ffeaa0; }
+  tr:hover td { background: #f3f8ff; }
+  .warn { color: #c00; font-weight: 600; }
+  #status { padding: 4px 8px; color: #555; border-top: 1px solid #ddd; min-height: 1.3em; }
+  #map { height: 100%; }
+  .fix-icon div { width: 22px; height: 22px; border-radius: 50%; background: #1565c0; color: #fff;
+                  border: 2px solid #fff; box-shadow: 0 0 3px #000; font: 600 11px/22px system-ui;
+                  text-align: center; margin: -2px; }
+  .fix-icon.sel div { background: #f9a825; color: #000; }
+  .coords { background: rgba(255,255,255,.85); padding: 2px 6px; font: 12px ui-monospace, monospace; }
+  kbd { border: 1px solid #bbb; border-radius: 3px; padding: 0 3px; background: #fafafa; font-size: 11px; }
+  details { padding: 0 8px 4px; color: #555; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="left">
+    <div id="videoWrap">
+      <video id="video" preload="auto" muted playsinline></video>
+      <div id="dropHint">Video öffnen oder hierher ziehen<br>(auch CSV/GeoJSON-Fixpunkte, GPX/GeoJSON-Referenzlinie)</div>
+    </div>
+    <input id="seek" type="range" min="0" max="0" step="any" value="0">
+    <div class="bar">
+      <label class="btn">Video öffnen… <input id="videoFile" type="file" accept="video/*"></label>
+      <button id="bBack1s" title="Shift+←">−1 s</button>
+      <button id="bPrevFrame" title="←">◀ Frame</button>
+      <button id="bPlay" title="Leertaste">▶</button>
+      <button id="bNextFrame" title="→">Frame ▶</button>
+      <button id="bFwd1s" title="Shift+→">+1 s</button>
+      <select id="rate" title="Geschwindigkeit">
+        <option value="0.25">0,25×</option><option value="0.5">0,5×</option><option value="1" selected>1×</option>
+        <option value="2">2×</option><option value="4">4×</option><option value="8">8×</option>
+      </select>
+      <span id="time">–</span>
+      <label>fps <input id="fps" type="number" min="1" max="240" step="any" value="30"></label>
+    </div>
+    <div class="bar">
+      <label><input id="pickMode" type="checkbox" checked> Klick in Karte setzt Fixpunkt</label>
+      <label>σ <input id="sigmaDefault" type="number" min="0" step="any" value="5"> m</label>
+      <label class="btn">Referenzlinie… <input id="refFile" type="file" accept=".gpx,.geojson,.json"></label>
+      <label class="btn">Fixpunkte laden… <input id="fixFile" type="file" accept=".csv,.geojson,.json"></label>
+      <button id="bExportCsv">Export CSV</button>
+      <button id="bExportGeojson">Export GeoJSON</button>
+      <button id="bClear">Alle löschen</button>
+    </div>
+    <details>
+      <summary>Bedienung</summary>
+      <kbd>Leertaste</kbd> Play/Pause · <kbd>←</kbd>/<kbd>→</kbd> 1 Frame · <kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> 1 s ·
+      <kbd>Strg</kbd>+<kbd>←</kbd>/<kbd>→</kbd> 10 s · <kbd>Entf</kbd> gewählten Fixpunkt löschen ·
+      <kbd>N</kbd>/<kbd>P</kbd> nächster/vorheriger Fixpunkt.<br>
+      Klick in die Karte setzt einen Fixpunkt zur aktuellen Videozeit (existiert dort schon einer, wird er verschoben).
+      Marker lassen sich ziehen; Klick auf Marker oder Tabellenzeile springt im Video dorthin.
+      Rote Markierung = zwischen Fixpunkten linear interpolierte Position. Fixpunkte werden je Video im Browser zwischengespeichert.
+    </details>
+    <div id="fixTableWrap">
+      <table>
+        <thead><tr><th>#</th><th>Zeit [s]</th><th>Frame</th><th>Δt [s]</th><th>Δs [m]</th><th>v [km/h]</th><th>σ [m]</th><th class="note">Notiz</th><th></th></tr></thead>
+        <tbody id="fixRows"></tbody>
+      </table>
+    </div>
+    <div id="status"></div>
+  </div>
+  <div id="map"></div>
+</div>
+
+<script>
+'use strict';
+
+// ---------- map ----------
+
+const AT = 'https://mapsneu.wien.gv.at/basemap/{layer}/{style}/google3857/{z}/{y}/{x}.{ext}';
+const CH = 'https://wmts.geo.admin.ch/1.0.0/{layer}/default/current/3857/{z}/{x}/{y}.{ext}';
+const attrAT = '© <a href="https://basemap.at">basemap.at</a>';
+const attrCH = '© <a href="https://www.swisstopo.admin.ch">swisstopo</a>';
+const attrOSM = '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>-Mitwirkende';
+const opts = (o) => Object.assign({ maxZoom: 21 }, o);
+
+const baseLayers = {
+  'AT · basemap.at Karte': L.tileLayer(AT, opts({ layer: 'geolandbasemap', style: 'normal', ext: 'png', maxNativeZoom: 19, attribution: attrAT })),
+  'AT · basemap.at Grau': L.tileLayer(AT, opts({ layer: 'bmapgrau', style: 'normal', ext: 'png', maxNativeZoom: 19, attribution: attrAT })),
+  'AT · basemap.at Orthofoto': L.tileLayer(AT, opts({ layer: 'bmaporthofoto30cm', style: 'normal', ext: 'jpeg', maxNativeZoom: 19, attribution: attrAT })),
+  'AT · basemap.at Gelände (ALS-Schummerung)': L.tileLayer(AT, opts({ layer: 'bmapgelaende', style: 'grau', ext: 'jpeg', maxNativeZoom: 17, attribution: attrAT })),
+  'AT · basemap.at Oberfläche (ALS-Schummerung)': L.tileLayer(AT, opts({ layer: 'bmapoberflaeche', style: 'grau', ext: 'jpeg', maxNativeZoom: 17, attribution: attrAT })),
+  'AT · Tirol Orthofoto aktuell (tiris)': L.tileLayer.wms('https://gis.tirol.gv.at/arcgis/services/Service_Public/orthofoto/MapServer/WMSServer', {
+    layers: 'Image_Aktuell_RGB', format: 'image/jpeg', version: '1.3.0', maxZoom: 21,
+    attribution: '© <a href="https://www.tirol.gv.at/tiris">Land Tirol – tiris</a>' }),
+  'CH · swisstopo Karte': L.tileLayer(CH, opts({ layer: 'ch.swisstopo.pixelkarte-farbe', ext: 'jpeg', maxNativeZoom: 18, attribution: attrCH })),
+  'CH · swisstopo Orthofoto (SWISSIMAGE)': L.tileLayer(CH, opts({ layer: 'ch.swisstopo.swissimage', ext: 'jpeg', maxNativeZoom: 20, attribution: attrCH })),
+  'CH · swisstopo Relief': L.tileLayer(CH, opts({ layer: 'ch.swisstopo.swissalti3d-reliefschattierung', ext: 'png', maxNativeZoom: 18, attribution: attrCH })),
+  'OSM · Standard': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', opts({ maxNativeZoom: 19, attribution: attrOSM })),
+  'OSM · OpenTopoMap': L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', opts({ subdomains: 'abc', maxNativeZoom: 17,
+    attribution: attrOSM + ', SRTM | © <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)' })),
+  'Welt · Esri Orthofoto': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', opts({ maxNativeZoom: 19,
+    attribution: 'Bilder © Esri, Maxar, Earthstar Geographics u. a.' })),
+};
+
+const refLayer = L.featureGroup();
+const fixLayer = L.featureGroup();
+const pathLayer = L.polyline([], { color: '#1565c0', weight: 2, opacity: 0.7, dashArray: '4 4' });
+const posMarker = L.circleMarker([0, 0], { radius: 7, color: '#fff', weight: 2, fillColor: '#e53935', fillOpacity: 1 });
+const overlays = {
+  'basemap.at Beschriftung': L.tileLayer(AT, opts({ layer: 'bmapoverlay', style: 'normal', ext: 'png', maxNativeZoom: 19, attribution: attrAT })),
+  'Referenzlinie': refLayer,
+  'Fixpunkte': fixLayer,
+  'Verbindung Fixpunkte': pathLayer,
+};
+
+const map = L.map('map', { zoomControl: true }).setView([47.2, 11.4], 11);
+const savedBase = localStorage.getItem('fixpicker:base');
+(baseLayers[savedBase] || baseLayers['AT · basemap.at Orthofoto']).addTo(map);
+[refLayer, fixLayer, pathLayer].forEach((l) => l.addTo(map));
+L.control.layers(baseLayers, overlays, { collapsed: false }).addTo(map);
+L.control.scale({ imperial: false }).addTo(map);
+map.on('baselayerchange', (e) => localStorage.setItem('fixpicker:base', e.name));
+
+const coordsCtl = L.control({ position: 'bottomleft' });
+coordsCtl.onAdd = () => { const d = L.DomUtil.create('div', 'coords'); d.textContent = '–'; return d; };
+coordsCtl.addTo(map);
+map.on('mousemove', (e) => {
+  coordsCtl.getContainer().textContent = `${e.latlng.lat.toFixed(6)}, ${e.latlng.lng.toFixed(6)}`;
+});
+
+// ---------- state ----------
+
+const video = document.getElementById('video');
+const $ = (id) => document.getElementById(id);
+const state = { videoName: null, fixes: [], selected: null, nextId: 1 };
+let fpsUserSet = false;
+
+function fps() { return Math.max(1, parseFloat($('fps').value) || 30); }
+function frameOf(t) { return Math.floor(t * fps() + 1e-3); }
+function status(msg) { $('status').textContent = msg; }
+
+function haversine(a, b) {
+  const R = 6371008.8, rad = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * rad, dLon = (b.lon - a.lon) * rad;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function storageKey() { return state.videoName ? 'fixpicker:fixes:' + state.videoName : null; }
+
+function save() {
+  const key = storageKey();
+  if (key) localStorage.setItem(key, JSON.stringify({ fps: fps(), fixes: state.fixes }));
+}
+
+function restore() {
+  const key = storageKey();
+  const raw = key && localStorage.getItem(key);
+  if (!raw) return false;
+  const data = JSON.parse(raw);
+  if (data.fps) { $('fps').value = data.fps; fpsUserSet = true; }
+  setFixes(data.fixes || []);
+  return true;
+}
+
+function setFixes(fixes) {
+  state.fixes = fixes.map((f) => ({ id: state.nextId++, t: +f.t, lat: +f.lat, lon: +f.lon,
+                                   sigma: f.sigma === '' || f.sigma == null ? 5 : +f.sigma, note: f.note || '' }));
+  state.selected = null;
+  refresh();
+}
+
+// ---------- fixes ----------
+
+function sortFixes() { state.fixes.sort((a, b) => a.t - b.t); }
+
+function addOrMoveFix(latlng) {
+  const t = video.currentTime;
+  let fix = state.fixes.find((f) => Math.abs(f.t - t) < 0.5 / fps());
+  if (fix) {
+    fix.lat = latlng.lat; fix.lon = latlng.lng;
+    status(`Fixpunkt bei ${t.toFixed(3)} s verschoben.`);
+  } else {
+    fix = { id: state.nextId++, t, lat: latlng.lat, lon: latlng.lng, sigma: parseFloat($('sigmaDefault').value) || 5, note: '' };
+    state.fixes.push(fix);
+    status(`Fixpunkt bei ${t.toFixed(3)} s gesetzt.`);
+  }
+  state.selected = fix.id;
+  refresh();
+}
+
+function deleteFix(id) {
+  state.fixes = state.fixes.filter((f) => f.id !== id);
+  if (state.selected === id) state.selected = null;
+  refresh();
+}
+
+function selectFix(id, seek = true) {
+  state.selected = id;
+  const fix = state.fixes.find((f) => f.id === id);
+  if (fix && seek) { video.pause(); video.currentTime = fix.t; }
+  refresh();
+}
+
+function refresh() {
+  sortFixes();
+  renderMarkers();
+  renderTable();
+  updatePosition();
+  save();
+}
+
+function renderMarkers() {
+  fixLayer.clearLayers();
+  state.fixes.forEach((f, i) => {
+    const icon = L.divIcon({ className: 'fix-icon' + (f.id === state.selected ? ' sel' : ''),
+                             html: `<div>${i + 1}</div>`, iconSize: [22, 22] });
+    const m = L.marker([f.lat, f.lon], { icon, draggable: true, title: `${f.t.toFixed(3)} s ${f.note}` });
+    m.on('click', () => selectFix(f.id));
+    m.on('dragend', () => { const ll = m.getLatLng(); f.lat = ll.lat; f.lon = ll.lng; state.selected = f.id; refresh(); });
+    fixLayer.addLayer(m);
+  });
+  pathLayer.setLatLngs(state.fixes.map((f) => [f.lat, f.lon]));
+}
+
+function renderTable() {
+  const tbody = $('fixRows');
+  tbody.innerHTML = '';
+  state.fixes.forEach((f, i) => {
+    const prev = state.fixes[i - 1];
+    const dt = prev ? f.t - prev.t : null;
+    const ds = prev ? haversine(prev, f) : null;
+    const v = prev && dt > 0 ? ds / dt * 3.6 : null;
+    const tr = document.createElement('tr');
+    if (f.id === state.selected) tr.className = 'sel';
+    tr.innerHTML = `<td>${i + 1}</td><td>${f.t.toFixed(3)}</td><td>${frameOf(f.t)}</td>
+      <td>${dt == null ? '' : dt.toFixed(1)}</td><td>${ds == null ? '' : ds.toFixed(0)}</td>
+      <td class="${v != null && v > 130 ? 'warn' : ''}">${v == null ? '' : v.toFixed(0)}</td>
+      <td><input class="sigma" type="number" min="0" step="any"></td>
+      <td class="note"><input class="note" type="text" placeholder="z. B. Kehre, Brücke, km-Tafel"></td>
+      <td><button title="löschen">✕</button></td>`;
+    const [sigmaIn, noteIn] = tr.querySelectorAll('input');
+    sigmaIn.value = f.sigma;
+    noteIn.value = f.note;
+    sigmaIn.addEventListener('change', () => { f.sigma = parseFloat(sigmaIn.value) || 0; save(); });
+    noteIn.addEventListener('change', () => { f.note = noteIn.value; save(); renderMarkers(); });
+    tr.querySelector('button').addEventListener('click', (e) => { e.stopPropagation(); deleteFix(f.id); });
+    tr.addEventListener('click', (e) => { if (e.target.tagName !== 'INPUT') selectFix(f.id); });
+    tbody.appendChild(tr);
+  });
+}
+
+function interpolate(t) {
+  const fx = state.fixes;
+  if (fx.length === 0 || t < fx[0].t || t > fx[fx.length - 1].t) return null;
+  for (let i = 1; i < fx.length; i++) {
+    if (t <= fx[i].t) {
+      const a = fx[i - 1], b = fx[i];
+      const w = b.t > a.t ? (t - a.t) / (b.t - a.t) : 0;
+      return [a.lat + w * (b.lat - a.lat), a.lon + w * (b.lon - a.lon)];
+    }
+  }
+  return [fx[0].lat, fx[0].lon];
+}
+
+function updatePosition() {
+  const t = video.currentTime || 0;
+  const dur = isFinite(video.duration) ? video.duration : 0;
+  $('time').textContent = `${t.toFixed(3)} / ${dur.toFixed(1)} s · F ${frameOf(t)}`;
+  if (document.activeElement !== $('seek')) $('seek').value = t;
+  const p = interpolate(t);
+  if (p) { posMarker.setLatLng(p); if (!map.hasLayer(posMarker)) posMarker.addTo(map); }
+  else if (map.hasLayer(posMarker)) map.removeLayer(posMarker);
+}
+
+// ---------- video ----------
+
+function loadVideo(src, name) {
+  state.videoName = name;
+  video.src = src;
+  $('dropHint').style.display = 'none';
+  document.title = `${name} – Fixpunkte`;
+  fpsUserSet = false;
+  if (restore()) {
+    status(`${name}: ${state.fixes.length} Fixpunkte aus dem Zwischenspeicher geladen.`);
+    if (state.fixes.length) map.fitBounds(fixLayer.getBounds().pad(0.3), { maxZoom: 17 });
+  } else {
+    setFixes([]);
+    status(`${name} geladen.`);
+  }
+}
+
+video.addEventListener('loadedmetadata', () => { $('seek').max = video.duration; updatePosition(); });
+video.addEventListener('timeupdate', updatePosition);
+video.addEventListener('seeked', updatePosition);
+video.addEventListener('play', () => { $('bPlay').textContent = '⏸'; });
+video.addEventListener('pause', () => { $('bPlay').textContent = '▶'; });
+video.addEventListener('error', () => status('Video konnte nicht geladen werden (Codec/Pfad prüfen).'));
+
+// per-frame display updates and fps estimate from presented frames
+if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+  let last = null; const samples = [];
+  const onFrame = (now, meta) => {
+    if (last && meta.presentedFrames === last.presentedFrames + 1 && !video.paused) {
+      const dt = meta.mediaTime - last.mediaTime;
+      if (dt > 0) samples.push(dt);
+      if (!fpsUserSet && samples.length === 30) {
+        samples.sort((a, b) => a - b);
+        const est = 1 / samples[15];
+        const known = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 100, 119.88, 120];
+        const snap = known.reduce((a, b) => Math.abs(b - est) < Math.abs(a - est) ? b : a);
+        $('fps').value = Math.abs(snap - est) < 0.5 ? snap : est.toFixed(2);
+        refresh();
+      }
+    }
+    last = meta;
+    updatePosition();
+    video.requestVideoFrameCallback(onFrame);
+  };
+  video.requestVideoFrameCallback(onFrame);
+}
+
+function togglePlay() { if (!video.src) return; video.paused ? video.play() : video.pause(); }
+function stepFrames(n) {
+  if (!video.src) return;
+  video.pause();
+  const f = Math.max(0, frameOf(video.currentTime) + n);
+  video.currentTime = Math.min((f + 0.5) / fps(), video.duration || Infinity);
+}
+function stepSeconds(s) {
+  if (!video.src) return;
+  video.currentTime = Math.max(0, Math.min(video.currentTime + s, video.duration || Infinity));
+}
+function jumpFix(dir) {
+  const t = video.currentTime, eps = 0.5 / fps();
+  const target = dir > 0 ? state.fixes.find((f) => f.t > t + eps)
+                         : [...state.fixes].reverse().find((f) => f.t < t - eps);
+  if (target) selectFix(target.id);
+}
+
+$('bPlay').onclick = togglePlay;
+$('bPrevFrame').onclick = () => stepFrames(-1);
+$('bNextFrame').onclick = () => stepFrames(1);
+$('bBack1s').onclick = () => stepSeconds(-1);
+$('bFwd1s').onclick = () => stepSeconds(1);
+$('rate').onchange = () => { video.playbackRate = parseFloat($('rate').value); $('rate').blur(); };
+$('fps').onchange = () => { fpsUserSet = true; refresh(); };
+$('seek').addEventListener('input', () => { video.currentTime = parseFloat($('seek').value); });
+$('seek').addEventListener('change', () => $('seek').blur());
+
+document.addEventListener('keydown', (e) => {
+  const tag = e.target.tagName;
+  if ((tag === 'INPUT' && e.target.type !== 'range' && e.target.type !== 'checkbox') || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  const step = e.ctrlKey || e.metaKey ? 10 : 1;
+  switch (e.key) {
+    case ' ': togglePlay(); break;
+    case 'ArrowLeft': e.shiftKey || e.ctrlKey || e.metaKey ? stepSeconds(-step) : stepFrames(-1); break;
+    case 'ArrowRight': e.shiftKey || e.ctrlKey || e.metaKey ? stepSeconds(step) : stepFrames(1); break;
+    case 'Delete': case 'Backspace': if (state.selected != null) deleteFix(state.selected); break;
+    case 'n': case 'N': jumpFix(1); break;
+    case 'p': case 'P': jumpFix(-1); break;
+    default: return;
+  }
+  e.preventDefault();
+});
+
+map.on('click', (e) => {
+  if (!$('pickMode').checked) return;
+  if (!video.src) { status('Erst ein Video laden.'); return; }
+  video.pause();
+  addOrMoveFix(e.latlng);
+});
+
+// ---------- import / export ----------
+
+function download(name, text, type) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function baseName() { return (state.videoName || 'fixes').replace(/\.[^.]+$/, ''); }
+const csvQuote = (s) => /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+
+function toCsv() {
+  const rows = ['video_time_s,frame,lon,lat,sigma_m,note'];
+  state.fixes.forEach((f) => rows.push([f.t.toFixed(3), frameOf(f.t), f.lon.toFixed(7), f.lat.toFixed(7), f.sigma, csvQuote(f.note)].join(',')));
+  return rows.join('\n') + '\n';
+}
+
+function toGeojson() {
+  return JSON.stringify({
+    type: 'FeatureCollection',
+    properties: { video: state.videoName, fps: fps() },
+    features: state.fixes.map((f) => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [+f.lon.toFixed(7), +f.lat.toFixed(7)] },
+      properties: { video_time_s: +f.t.toFixed(3), frame: frameOf(f.t), sigma_m: f.sigma, note: f.note },
+    })),
+  }, null, 1);
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = '', quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else field += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ',' || c === ';') { row.push(field); field = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(field); field = '';
+      if (row.some((x) => x !== '')) rows.push(row);
+      row = [];
+    } else field += c;
+  }
+  row.push(field);
+  if (row.some((x) => x !== '')) rows.push(row);
+  const head = rows.shift().map((h) => h.trim().toLowerCase());
+  const col = (...names) => head.findIndex((h) => names.includes(h));
+  const iT = col('video_time_s', 't', 'time'), iLon = col('lon', 'lng', 'x'), iLat = col('lat', 'y');
+  const iS = col('sigma_m', 'sigma'), iN = col('note', 'notiz');
+  if (iT < 0 || iLon < 0 || iLat < 0) throw new Error('CSV braucht die Spalten video_time_s, lon, lat');
+  return rows.map((r) => ({ t: r[iT], lon: r[iLon], lat: r[iLat], sigma: iS >= 0 ? r[iS] : '', note: iN >= 0 ? r[iN] : '' }));
+}
+
+function fixesFromGeojson(gj) {
+  return (gj.features || [])
+    .filter((f) => f.geometry && f.geometry.type === 'Point' && f.properties && f.properties.video_time_s != null)
+    .map((f) => ({ t: f.properties.video_time_s, lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1],
+                   sigma: f.properties.sigma_m, note: f.properties.note }));
+}
+
+function gpxToGeojson(text) {
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  const lines = [];
+  doc.querySelectorAll('trkseg, rte').forEach((seg) => {
+    const pts = [...seg.querySelectorAll('trkpt, rtept')].map((p) => [+p.getAttribute('lon'), +p.getAttribute('lat')]);
+    if (pts.length > 1) lines.push(pts);
+  });
+  return { type: 'Feature', geometry: { type: 'MultiLineString', coordinates: lines }, properties: {} };
+}
+
+function loadReference(gj, name) {
+  refLayer.clearLayers();
+  L.geoJSON(gj, {
+    style: { color: '#ff6d00', weight: 4, opacity: 0.6 },
+    pointToLayer: (f, ll) => L.circleMarker(ll, { radius: 3, color: '#ff6d00' }),
+  }).addTo(refLayer);
+  if (refLayer.getLayers().length) map.fitBounds(refLayer.getBounds().pad(0.1));
+  status(`Referenzlinie ${name} geladen.`);
+}
+
+function loadFixes(list, name) {
+  if (state.fixes.length && !confirm(`Vorhandene ${state.fixes.length} Fixpunkte durch ${list.length} aus ${name} ersetzen?`)) return;
+  setFixes(list);
+  if (state.fixes.length) map.fitBounds(fixLayer.getBounds().pad(0.3), { maxZoom: 17 });
+  status(`${state.fixes.length} Fixpunkte aus ${name} geladen.`);
+}
+
+async function handleFile(file, kind) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (file.type.startsWith('video/') || ['mp4', 'mov', 'mkv', 'webm', 'avi'].includes(ext)) {
+    loadVideo(URL.createObjectURL(file), file.name);
+    return;
+  }
+  const text = await file.text();
+  try {
+    if (ext === 'gpx') return loadReference(gpxToGeojson(text), file.name);
+    if (ext === 'csv') return loadFixes(parseCsv(text), file.name);
+    if (ext === 'geojson' || ext === 'json') {
+      const gj = JSON.parse(text);
+      const fixes = fixesFromGeojson(gj);
+      if (kind === 'ref' || (kind !== 'fix' && fixes.length === 0)) return loadReference(gj, file.name);
+      return loadFixes(fixes, file.name);
+    }
+    status(`Unbekanntes Dateiformat: ${file.name}`);
+  } catch (err) {
+    status(`Fehler beim Lesen von ${file.name}: ${err.message}`);
+  }
+}
+
+$('videoFile').onchange = (e) => e.target.files[0] && handleFile(e.target.files[0]);
+$('refFile').onchange = (e) => e.target.files[0] && handleFile(e.target.files[0], 'ref');
+$('fixFile').onchange = (e) => e.target.files[0] && handleFile(e.target.files[0], 'fix');
+$('bExportCsv').onclick = () => download(baseName() + '_fixes.csv', toCsv(), 'text/csv');
+$('bExportGeojson').onclick = () => download(baseName() + '_fixes.geojson', toGeojson(), 'application/geo+json');
+$('bClear').onclick = () => { if (state.fixes.length && confirm('Alle Fixpunkte löschen?')) setFixes([]); };
+
+$('left').addEventListener('dragover', (e) => e.preventDefault());
+$('left').addEventListener('drop', (e) => {
+  e.preventDefault();
+  [...e.dataTransfer.files].forEach((f) => handleFile(f));
+});
+
+// ?video=/videos/brenner.mp4  (served by tools/serve.py, which supports seeking)
+const param = new URLSearchParams(location.search).get('video');
+if (param) loadVideo(param, decodeURIComponent(param.split('/').pop()));
+</script>
+</body>
+</html>
