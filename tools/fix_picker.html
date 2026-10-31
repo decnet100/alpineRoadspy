@@ -179,7 +179,7 @@ map.on('mousemove', (e) => {
 
 const video = document.getElementById('video');
 const $ = (id) => document.getElementById(id);
-// fixes: { id, t, lat, lon, sigma, note, snapIdx } + derived: snap, cands, station, offset
+// fixes: { id, t, lat, lon, sigma, note, snapIdx, snapManual } + derived: snap, cands, candList, station, offset
 // routes[i]: path between fixes i and i+1: { path: RoadNet.Path, ok, roads, offA, offB }
 const state = { videoName: null, fixes: [], routes: [], ext: null, selected: null, nextId: 1 };
 let fpsUserSet = false;
@@ -193,7 +193,7 @@ function storageKey() { return state.videoName ? 'fixpicker:fixes:' + state.vide
 
 function save() {
   const key = storageKey();
-  const fixes = state.fixes.map(({ t, lat, lon, sigma, note, snapIdx }) => ({ t, lat, lon, sigma, note, snapIdx }));
+  const fixes = state.fixes.map(({ t, lat, lon, sigma, note, snapIdx, snapManual }) => ({ t, lat, lon, sigma, note, snapIdx, snapManual }));
   if (key) localStorage.setItem(key, JSON.stringify({ fps: fps(), fixes }));
 }
 
@@ -210,7 +210,7 @@ function restore() {
 function setFixes(fixes) {
   state.fixes = fixes.map((f) => ({ id: state.nextId++, t: +f.t, lat: +f.lat, lon: +f.lon,
                                    sigma: f.sigma === '' || f.sigma == null ? 5 : +f.sigma, note: f.note || '',
-                                   snapIdx: +f.snapIdx || 0 }));
+                                   snapIdx: +f.snapIdx || 0, snapManual: !!f.snapManual }));
   state.selected = null;
   refresh();
 }
@@ -223,10 +223,11 @@ function addOrMoveFix(latlng) {
   const t = video.currentTime;
   let fix = state.fixes.find((f) => Math.abs(f.t - t) < 0.5 / fps());
   if (fix) {
-    Object.assign(fix, { lat: latlng.lat, lon: latlng.lng, snapIdx: 0 });
+    Object.assign(fix, { lat: latlng.lat, lon: latlng.lng, snapIdx: 0, snapManual: false });
     status(`Fixpunkt bei ${t.toFixed(3)} s verschoben.`);
   } else {
-    fix = { id: state.nextId++, t, lat: latlng.lat, lon: latlng.lng, sigma: parseFloat($('sigmaDefault').value) || 5, note: '', snapIdx: 0 };
+    fix = { id: state.nextId++, t, lat: latlng.lat, lon: latlng.lng, sigma: parseFloat($('sigmaDefault').value) || 5, note: '',
+            snapIdx: 0, snapManual: false };
     state.fixes.push(fix);
     status(`Fixpunkt bei ${t.toFixed(3)} s gesetzt.`);
   }
@@ -251,6 +252,7 @@ function selectFix(id, seek = true) {
 function cycleRoad(fix) {
   if (!fix || !(fix.cands > 1)) return;
   fix.snapIdx = (fix.snapIdx + 1) % fix.cands;
+  fix.snapManual = true;   // a road chosen by hand is kept; otherwise routing picks the most plausible one
   refresh();
 }
 
@@ -273,7 +275,7 @@ function renderMarkers() {
                              html: `<div>${i + 1}</div>`, iconSize: [22, 22] });
     const m = L.marker([f.lat, f.lon], { icon, draggable: true, title: `${f.t.toFixed(3)} s ${f.note}` });
     m.on('click', () => selectFix(f.id));
-    m.on('dragend', () => { const ll = m.getLatLng(); Object.assign(f, { lat: ll.lat, lon: ll.lng, snapIdx: 0 }); state.selected = f.id; refresh(); });
+    m.on('dragend', () => { const ll = m.getLatLng(); Object.assign(f, { lat: ll.lat, lon: ll.lng, snapIdx: 0, snapManual: false }); state.selected = f.id; refresh(); });
     fixLayer.addLayer(m);
   });
   lineLayer.setLatLngs(state.fixes.map((f) => [f.lat, f.lon]));
@@ -360,7 +362,7 @@ async function fetchLocal(b) {
   if (gj.error) throw new Error(gj.error);
   return gj.features.map((f) => {
     const p = f.properties;
-    return { id: 'l' + p.id, coords: toLatLon(f.geometry.coordinates), name: p.name || p.category || '',
+    return { id: 'l' + p.id, source: 'gip', coords: toLatLon(f.geometry.coordinates), name: p.name || p.category || '',
              cost: p.cost || 1, from: p.from, to: p.to };
   });
 }
@@ -380,7 +382,8 @@ async function fetchTirol(b) {
       if (p.OBJEKT.startsWith('B-')) continue;   // railways
       const name = p.STRNAME_HOCHRANGIG || p.STRNAME || p.OBJEKTBEZEICHNUNG || '';
       lineParts(f.geometry).forEach((pts, k) => segs.push({
-        id: `t${f.id}/${k}`, coords: toLatLon(pts), name, cost: p.OBJEKT === 'S-FRW' ? 3 : 1,
+        // footpaths only as a last resort: in serpentines they would otherwise cut the hairpins
+        id: `t${f.id}/${k}`, source: 'tirol', coords: toLatLon(pts), name, cost: p.OBJEKT === 'S-FRW' ? 10 : 1,
         structure: !!p.KUNSTBAUTEN, level: p.OBJEKT === 'S-A' ? 'motorway' : p.OBJEKT === 'S-AR' ? 'ramp' : undefined,
       }));
     }
@@ -398,7 +401,8 @@ async function fetchSwiss(b) {
     const res = (await getJson(url)).results || [];
     for (const f of res) {
       lineParts(f.geometry).forEach((pts, k) => segs.push({
-        id: `c${f.featureId}/${k}`, coords: toLatLon(pts), name: f.properties.strassenname || f.properties.label || '',
+        // `label` holds a class code, not a name
+        id: `c${f.featureId}/${k}`, source: 'ch', coords: toLatLon(pts), name: f.properties.strassenname || '',
       }));
     }
     if (res.length < page) break;
@@ -406,10 +410,21 @@ async function fetchSwiss(b) {
   return segs;
 }
 
+// Drives across the AT/CH border: both datasets at once (GIP if served locally, else the
+// Tirol WFS); roadnet.js joins their loose ends at the border.
+async function fetchMixed(b) {
+  const results = await Promise.allSettled([(localRoads ? fetchLocal : fetchTirol)(b), fetchSwiss(b)]);
+  const ok = results.filter((r) => r.status === 'fulfilled');
+  if (!ok.length) throw results[0].reason;
+  return ok.flatMap((r) => r.value);
+}
+
+let localRoads = false;   // set by initRoadSource: serve.py has a road file
 const ROAD_PROVIDERS = {
   local: { label: 'GIP (lokal, serve.py)', fetch: fetchLocal },
   tirol: { label: 'Tirol Verkehrswege (WFS)', fetch: fetchTirol },
   ch: { label: 'swissTLM3D (CH)', fetch: fetchSwiss },
+  mixed: { label: 'AT + CH (Grenzübertritt)', fetch: fetchMixed },
   off: { label: 'aus (Luftlinie)', fetch: null },
 };
 
@@ -435,19 +450,32 @@ async function ensureRoads(provider, box) {
 function snapFix(f, radius) {
   const cands = roads.net.size ? roads.net.snap(f.lat, f.lon, radius) : [];
   f.cands = cands.length;
-  f.snapIdx = cands.length ? (f.snapIdx || 0) % cands.length : 0;
+  f.candList = cands;
+  f.snapIdx = cands.length && f.snapManual ? f.snapIdx % cands.length : 0;
   f.snap = cands[f.snapIdx] || null;
 }
 
+// Candidate roads to try for a fix: the one chosen by hand, else the nearest few
+// (with overlapping datasets or parallel roads the nearest is not always the one driven).
+const snapOptions = (f) => !f.snap ? [] : f.snapManual ? [f.snap] : f.candList.slice(0, 3);
+
 function routePair(a, b) {
   const straight = dist(a, b);
-  if (a.snap && b.snap) {
-    const r = roads.net.route(a.snap, b.snap, Math.max(4 * straight, straight + 3000));
-    if (r && r.coords.length > 1) {
+  let best = null;
+  for (const sa of snapOptions(a)) {
+    for (const sb of snapOptions(b)) {
+      // generous detour limit: serpentines are easily 5x as long as the straight line
+      const r = roads.net.route(sa, sb, Math.max(8 * straight, straight + 5000));
+      if (!r || r.coords.length < 2) continue;
       const path = new RoadNet.Path(r.coords);
-      return { path, ok: true, roads: r.roads,
-               offA: path.offsetOf(a.lat, a.lon, 0), offB: path.offsetOf(b.lat, b.lon, path.length) };
+      const score = path.length + 5 * (sa.dist + sb.dist);   // shortest drive, close to the clicks
+      if (!best || score < best.score) best = { score, path, roads: r.roads, snapA: sa, snapB: sb };
     }
+  }
+  if (best) {
+    const { path } = best;
+    return { path, ok: true, roads: best.roads, snapA: best.snapA, snapB: best.snapB,
+             offA: path.offsetOf(a.lat, a.lon, 0), offB: path.offsetOf(b.lat, b.lon, path.length) };
   }
   return { path: new RoadNet.Path([[a.lat, a.lon], [b.lat, b.lon]]), ok: false, roads: [], offA: 0, offB: 0 };
 }
@@ -512,6 +540,8 @@ async function routeAll() {
   }
   let station = 0;
   fixes.forEach((f, i) => {
+    const chosen = routes[i]?.snapA || routes[i - 1]?.snapB;   // road the routing settled on
+    if (chosen && !f.snapManual) { f.snap = chosen; f.snapIdx = Math.max(0, f.candList.indexOf(chosen)); }
     f.station = station;
     f.offset = routes[i]?.ok ? routes[i].offA : routes[i - 1]?.ok ? routes[i - 1].offB : null;
     if (routes[i]) station += routes[i].path.length;
@@ -858,6 +888,8 @@ async function initRoadSource() {
   const sel = $('roadSource');
   let localOk = false;
   try { localOk = !!(await getJson('/api/roads')).available; } catch (err) { /* served without --roads */ }
+  localRoads = localOk;
+  ROAD_PROVIDERS.mixed.label = (localOk ? 'GIP' : 'Tirol-WFS') + ' + swissTLM3D (Grenzübertritt AT/CH)';
   for (const [key, p] of Object.entries(ROAD_PROVIDERS)) {
     const o = new Option(p.label + (key === 'local' && !localOk ? ' – nicht verfügbar' : ''), key);
     o.disabled = key === 'local' && !localOk;

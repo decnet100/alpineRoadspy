@@ -65,7 +65,9 @@ const RoadNet = (() => {
   //    `level: 'ramp'` segments.
   // Segment ends lying on another segment (T-junction without a common vertex)
   // are connected too. `cost` (default 1) multiplies the routing weight, e.g.
-  // to use footpaths only as a last resort.
+  // to use footpaths only as a last resort. Segments from different datasets
+  // (`source`, e.g. GIP and swissTLM3D at the border) share no vertices; loose
+  // ends of one source are joined to the nearest vertex of another within 25 m.
   class Network {
     constructor() {
       this.segs = new Map();
@@ -119,7 +121,43 @@ const RoadNet = (() => {
         }
       }
       this.connectTJunctions(link);
+      this.connectSources(link);
       this.dirty = false;
+    }
+
+    // Join datasets that meet at a border: each loose end (a vertex used by one
+    // segment only) is linked to the nearest vertex of another source within `tol` m.
+    connectSources(link, tol = 25) {
+      const sources = new Set([...this.segs.values()].map((s) => s.source || ''));
+      if (sources.size < 2) return;
+      const cell = (x, y) => `${Math.floor(x / tol)},${Math.floor(y / tol)}`;
+      const grid = new Map();
+      for (const s of this.segs.values()) {
+        for (let i = 0; i < s.coords.length; i++) {
+          const c = cell(...s.xy[i]);
+          if (!grid.has(c)) grid.set(c, []);
+          grid.get(c).push([this.key(s, i), s.xy[i], s.source || '', s.level === 'motorway']);
+        }
+      }
+      for (const s of this.segs.values()) {
+        for (const end of [0, s.coords.length - 1]) {
+          const k = this.key(s, end);
+          if ((this.adj.get(k) || []).length !== 1) continue;
+          const [px, py] = s.xy[end];
+          const cx = Math.floor(px / tol), cy = Math.floor(py / tol);
+          let best = null;
+          for (let dx = -1; dx <= 1; dx++) {
+            for (let dy = -1; dy <= 1; dy++) {
+              for (const [ok, [ox, oy], src, mw] of grid.get(`${cx + dx},${cy + dy}`) || []) {
+                if (src === (s.source || '') || mw !== (s.level === 'motorway')) continue;
+                const d = Math.hypot(ox - px, oy - py);
+                if (d <= tol && (!best || d < best.d)) best = { ok, d };
+              }
+            }
+          }
+          if (best) { link(k, best.ok, best.d, s.id); link(best.ok, k, best.d, s.id); }
+        }
+      }
     }
 
     // Link dangling segment ends that lie within `tol` metres of another segment.
@@ -229,8 +267,8 @@ const RoadNet = (() => {
         if (!last || last[0] !== c[0] || last[1] !== c[1]) coords.push(c);
       }
       for (const id of segIds) {
-        const name = this.segs.get(id).name || '?';
-        if (roads[roads.length - 1] !== name) roads.push(name);
+        const name = this.segs.get(id).name;
+        if (name && roads[roads.length - 1] !== name) roads.push(name);   // unnamed pieces are left out
       }
       return { coords, roads };
     }

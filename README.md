@@ -45,6 +45,13 @@ video, no further fix is needed. Implausible speeds are flagged in the table.
 | **GIP** (local file, default) | routable link network of Austria, split at every junction |
 | Tirol Verkehrswege (WFS, Land Tirol) | fallback without local file, Tyrol only |
 | swissTLM3D (swisstopo) | Switzerland |
+| AT + CH (border crossing) | GIP (or Tirol WFS) and swissTLM3D together; loose road ends of the two datasets are joined within 25 m |
+
+With several roads within the snap radius (parallel roads, overlapping
+datasets at the border) the routing tries the nearest three per fix and takes
+the shortest plausible drive; a road chosen by hand (key `R`) is kept.
+On the Swiss side use the swisstopo or Esri imagery – basemap.at ends at the
+border.
 
 Prepare the GIP once: download `B_gip_network_ogd.zip` (about 4 GB) from
 <https://open.gip.gv.at/ogd/>, unzip it and extract the link network, e.g.
