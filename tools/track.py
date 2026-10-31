@@ -26,6 +26,7 @@ import html
 import json
 import math
 import os
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -217,26 +218,51 @@ def guardrail_sections(rows, traj, min_px, min_len, max_gap_m, lead_m):
 
 
 def thumbnails(video, objects, out_dir):
+    """One crop per object from its largest detection.
+
+    Reads the video once from front to back: seeking for every object is very
+    slow, especially for long, 4K or VP9/WebM videos.
+    """
     import cv2
 
-    cap = cv2.VideoCapture(str(video))
     (out_dir / "thumbs").mkdir(exist_ok=True)
-    for o in sorted(objects, key=lambda o: o["best"]["frame"]):
-        d = o["best"]
-        cap.set(cv2.CAP_PROP_POS_FRAMES, d["frame"])
+    wanted = {}
+    for o in objects:
+        wanted.setdefault(o["best"]["frame"], []).append(o)
+    targets = sorted(wanted)
+    if not targets:
+        return
+    cap = cv2.VideoCapture(str(video))
+    frame = 0
+    if targets[0] > 0:  # one jump to the first object; if it overshoots, start over from the beginning
+        cap.set(cv2.CAP_PROP_POS_FRAMES, targets[0])
+        frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        if frame > targets[0]:
+            cap = cv2.VideoCapture(str(video))
+            frame = 0
+    started, report = time.time(), max(1, len(targets) // 10)
+    for n, target in enumerate(targets, 1):
+        while frame < target and cap.grab():
+            frame += 1
         ok, img = cap.read()
+        frame += 1
         if not ok:
-            continue
+            break
         h, w = img.shape[:2]
-        bw, bh = d["x2"] - d["x1"], d["y2"] - d["y1"]
-        pad = max(bw, bh, 40)
-        x1, y1 = max(0, int(d["x1"] - pad)), max(0, int(d["y1"] - pad))
-        x2, y2 = min(w, int(d["x2"] + pad)), min(h, int(d["y2"] + pad))
-        crop = img[y1:y2, x1:x2].copy()
-        cv2.rectangle(crop, (int(d["x1"] - x1), int(d["y1"] - y1)), (int(d["x2"] - x1), int(d["y2"] - y1)), (255, 0, 255), 1)
-        scale = 160 / crop.shape[0]
-        crop = cv2.resize(crop, (max(1, int(crop.shape[1] * scale)), 160))
-        cv2.imwrite(str(out_dir / "thumbs" / f"{o['id']}.jpg"), crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        for o in wanted[target]:
+            d = o["best"]
+            bw, bh = d["x2"] - d["x1"], d["y2"] - d["y1"]
+            pad = max(bw, bh, 40 * h / 720)
+            x1, y1 = max(0, int(d["x1"] - pad)), max(0, int(d["y1"] - pad))
+            x2, y2 = min(w, int(d["x2"] + pad)), min(h, int(d["y2"] + pad))
+            crop = img[y1:y2, x1:x2].copy()
+            cv2.rectangle(crop, (int(d["x1"] - x1), int(d["y1"] - y1)), (int(d["x2"] - x1), int(d["y2"] - y1)),
+                          (255, 0, 255), max(1, h // 720))
+            scale = 160 / crop.shape[0]
+            crop = cv2.resize(crop, (max(1, int(crop.shape[1] * scale)), 160), interpolation=cv2.INTER_AREA)
+            cv2.imwrite(str(out_dir / "thumbs" / f"{o['id']}.jpg"), crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if n % report == 0:
+            print(f"  thumbnails: {n}/{len(targets)} frames, {time.time() - started:.0f} s", flush=True)
 
 
 REASON_TEXT = {"not_slender": "nicht schlank", "never_near": "nie nah passiert"}
@@ -424,6 +450,7 @@ def main():
 
     has_thumbs = not args.no_thumbs and video.exists()
     if has_thumbs:
+        print(f"Writing thumbnails for {len(objects)} objects (one pass through the video; --no-thumbs skips this) ...", flush=True)
         thumbnails(video, objects, out_dir)
     try:
         video_url = "/" + video.resolve().relative_to(ROOT).as_posix()
