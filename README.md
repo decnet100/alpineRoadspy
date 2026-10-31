@@ -56,6 +56,8 @@ python tools/prepare_gip.py path/to/gip_network_ogd.gpkg --bbox 10.0,46.6,13.1,4
 
 This writes `data/roads/gip_linknetz.gpkg`, which `serve.py` picks up
 automatically (any other line file: `--roads path`). Needs `geopandas`.
+Both the documented GIP schema and the renamed one of the 2026 exports
+(layer `LINK`, `node_from_short_id`, ...) are understood, see `tools/gip_schema.py`.
 
 ### Running
 

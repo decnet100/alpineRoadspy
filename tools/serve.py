@@ -19,18 +19,21 @@ import re
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
+from gip_schema import display_name, find_link_layer, resolve
+
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ROADS = ROOT / "data" / "roads" / "gip_linknetz.gpkg"
 RANGE_RE = re.compile(r"bytes=(\d*)-(\d*)$")
-NAME_FIELDS = ["NAME1", "STRNAME_HOCHRANGIG", "STRNAME", "STRASSENNAME", "NAME", "LABEL"]
+NAME_FIELDS = ["STRNAME_HOCHRANGIG", "STRNAME", "STRASSENNAME", "NAME", "LABEL"]
 
 
 class RoadSource:
     """Road lines from a local GeoPackage/Shapefile, queried by WGS84 bbox.
 
-    GIP link networks (LINK_ID, FROM_NODE, TO_NODE, ...) keep their node ids so
-    the browser can route on the real topology; other line datasets are passed
-    on with a name only.
+    GIP link networks (old and new export schema, see gip_schema.py) keep their
+    node ids so the browser can route on the real topology; other line datasets
+    are passed on with a name only. Use the file from tools/prepare_gip.py,
+    which also drops links that are not active.
     """
 
     def __init__(self, path):
@@ -41,14 +44,16 @@ class RoadSource:
         layers = [name for name, gtype in pyogrio.list_layers(self.path) if gtype and "LINE" in gtype.upper()]
         if not layers:
             raise SystemExit(f"No line layer in {path}")
-        # GIP: the routable LINK layer (GIP_LINKNETZ_OGD in older exports), not EDGE
-        self.layer = next((n for n in layers if n.lower() == "link" or "linknetz" in n.lower()), layers[0])
+        self.layer = find_link_layer(layers) or layers[0]  # GIP: LINK, not the non-routable EDGE
         info = pyogrio.read_info(self.path, layer=self.layer)
-        self.fields = {f.upper(): f for f in info["fields"]}
+        self.gip = resolve(info["fields"])
+        self.is_gip = {"FROM_NODE", "TO_NODE"} <= self.gip.keys()
+        self.new_schema = "NAME_LOCAL" in self.gip
+        upper = {f.upper(): f for f in info["fields"]}
+        self.name_fields = [upper[n] for n in NAME_FIELDS if n in upper]
         crs = CRS.from_user_input(info["crs"])
         self.to_source = None if crs.equals(CRS.from_epsg(4326)) else \
             Transformer.from_crs("EPSG:4326", crs, always_xy=True)
-        self.is_gip = {"FROM_NODE", "TO_NODE"} <= self.fields.keys()
         self.read = pyogrio.read_dataframe
         print(f"Roads: {path} (layer {self.layer}, {info['features']} features"
               f"{', GIP topology' if self.is_gip else ''})", flush=True)
@@ -57,30 +62,28 @@ class RoadSource:
         bbox = (lon0, lat0, lon1, lat1)
         if self.to_source:
             bbox = self.to_source.transform_bounds(*bbox)
-        # only active GIP links (BAUSTATUS 5) are part of the network
-        where = f"{self.fields['BAUSTATUS']} = 5" if "BAUSTATUS" in self.fields else None
-        gdf = self.read(self.path, layer=self.layer, bbox=bbox, where=where)
+        gdf = self.read(self.path, layer=self.layer, bbox=bbox)
         if gdf.crs and not gdf.crs.equals("EPSG:4326"):
             gdf = gdf.to_crs("EPSG:4326")
-        f = self.fields
-        get = lambda row, key: row.get(f[key]) if key in f else None
-        name_fields = [n for n in NAME_FIELDS if n in f]
         features = []
         for idx, row in gdf.iterrows():
             geom = row.geometry
             if geom is None or geom.is_empty:
                 continue
             parts = [geom] if geom.geom_type == "LineString" else list(getattr(geom, "geoms", []))
-            props = {"name": next((str(row[f[n]]) for n in name_fields if row[f[n]] not in (None, "")), "")}
             if self.is_gip:
-                props["id"] = int(get(row, "LINK_ID")) if "LINK_ID" in f else int(idx)
-                props["from"] = int(get(row, "FROM_NODE"))
-                props["to"] = int(get(row, "TO_NODE"))
-                props["category"] = get(row, "EDGECAT")
-                # no car access (forest/farm roads, footpaths): usable, but only as a last resort
-                props["cost"] = 3 if get(row, "ONEWAY_CAR") == -1 else 1
+                get = lambda key: row.get(self.gip[key]) if key in self.gip else None
+                props = {
+                    "id": int(get("LINK_ID")) if "LINK_ID" in self.gip else int(idx),
+                    "from": int(get("FROM_NODE")),
+                    "to": int(get("TO_NODE")),
+                    "name": display_name(get, self.new_schema),
+                    "category": get("EDGECAT"),
+                    # no car access (forest/farm roads, footpaths): usable, but only as a last resort
+                    "cost": 3 if get("ONEWAY_CAR") == -1 else 1,
+                }
             else:
-                props["id"] = int(idx)
+                props = {"id": int(idx), "name": next((str(row[n]) for n in self.name_fields if row[n] not in (None, "")), "")}
             for k, part in enumerate(parts):
                 features.append({
                     "type": "Feature",
