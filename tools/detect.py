@@ -3,7 +3,8 @@
 Runs a semantic segmentation model trained on Mapillary Vistas (Mask2Former,
 Swin-L) on every n-th frame and turns the classes of interest into objects
 (connected regions with bounding box): traffic signs, poles (delineator posts
-mostly show up as "Pole"), street lights, guardrails.
+mostly show up as "Pole"), street lights, guardrails (incl. "Barrier", which
+the model often uses for guardrails in curves and shade).
 
     python tools/detect.py videos/brenner.mp4 --step 3 --trajectory data/brenner_trajectory.csv
 
@@ -40,8 +41,11 @@ CLASSES = {
     "Utility Pole": ("utility_pole", (128, 0, 255)),
     "Street Light": ("street_light", (0, 255, 255)),
     "Guard Rail": ("guardrail", (0, 140, 255)),
+    # the model often labels guardrails in curves or shade as "Barrier" (also covers concrete barriers)
+    "Barrier": ("barrier", (0, 0, 255)),
 }
-MIN_AREA = {"guardrail": 400}  # pixels; default below
+RAIL_CLASSES = ("guardrail", "barrier")  # both count as road restraint in guardrails.csv
+MIN_AREA = {"guardrail": 400, "barrier": 400}  # pixels; default below
 DEFAULT_MIN_AREA = 30
 
 
@@ -88,7 +92,7 @@ def overlay(frame_bgr, seg, class_ids, colours, found):
         out[m] = out[m] * 0.4 + np.array(colours[name]) * 0.6
     out = out.astype(np.uint8)
     for name, x1, y1, x2, y2, *_ in found:
-        if name != "guardrail":
+        if name not in RAIL_CLASSES:
             cv2.rectangle(out, (int(x1) - 3, int(y1) - 3), (int(x2) + 3, int(y2) + 3), colours[name], 1)
     return out
 
@@ -211,7 +215,7 @@ def main():
                 side = "left" if cx < width / 2 else "right"  # image side only; camera roll not compensated yet
                 det.writerow([frame, f"{t:.3f}", name, x1, y1, x2, y2, area, f"{cx:.1f}", f"{cy:.1f}", side,
                               pos.get("station_m", ""), pos.get("lon", ""), pos.get("lat", ""), pos.get("heading_deg", "")])
-            rail_ids = [i for i, n in class_ids.items() if n == "guardrail"]
+            rail_ids = [i for i, n in class_ids.items() if n in RAIL_CLASSES]
             rails = np.isin(seg, rail_ids)
             top = int(rails.shape[0] * 0.3)
             rail.writerow([frame, f"{t:.3f}", int(rails[:, : width // 2].sum()), int(rails[:, width // 2:].sum()),
