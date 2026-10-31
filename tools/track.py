@@ -284,6 +284,8 @@ def main():
         o["lateral"] = LATERAL_M[o["group"]]
         o["lon"], o["lat"] = offset(p["lon"], p["lat"], p["heading"], o["side"], o["lateral"])
 
+    if args.guardrails and not rail_path.exists():
+        raise SystemExit(f"Guardrail file not found: {rail_path}")
     rail_rows = read_csv(rail_path) if rail_path.exists() else []
     near = bool(rail_rows) and "left_near_px" in rail_rows[0]
     rail_px = args.rail_px // 3 if near else args.rail_px
@@ -327,8 +329,11 @@ def main():
     for o in objects:
         counts[o["class"]] = counts.get(o["class"], 0) + 1
     print(f"{len(dets)} detections (step {step}) -> {len(objects)} objects: {counts}")
-    print(f"Guardrail sections ({'near field' if near else 'whole image half – rerun detect.py for near-field values'}): "
-          + ", ".join(f"{s:.0f}-{e:.0f} m {side}" for s, e, side in sections))
+    if not rail_rows:
+        print(f"No guardrails: {rail_path} not found")
+    else:
+        print(f"Guardrail sections from {rail_path} ({'near field' if near else 'whole image half – rerun detect.py for near-field values'}): "
+              + (", ".join(f"{s:.0f}-{e:.0f} m {side}" for s, e, side in sections) or "none"))
     print(f"Wrote {out_dir}")
 
 
