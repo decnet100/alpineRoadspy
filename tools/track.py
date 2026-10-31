@@ -11,8 +11,9 @@ carriageway width plus an assumed distance from the edge per object type).
 
     python tools/track.py videos/brenner.mp4 --trajectory data/brenner_trajectory.csv
 
-Reads data/detect/<video>/detections.csv and guardrails.csv (override with
---detections / --guardrails) and writes to data/objects/<video>/:
+Reads data/detect/<video>/detections.csv and guardrails.csv, or those of all
+partial runs in data/detect/<video>/part_*/ (override with --detections /
+--guardrails, several files allowed) and writes to data/objects/<video>/:
     objects.csv       one row per object
     objects.geojson   objects (points) and guardrail sections (lines), WGS84;
                       load it in the fix picker as reference layer to review
@@ -47,6 +48,28 @@ MERGE_S = 0.6  # same group and side passed within this time: one object
 def read_csv(path):
     with open(path, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
+
+
+def default_detections(base):
+    """detections.csv of a full run, else those of all partial runs (part_* folders)."""
+    if (base / "detections.csv").exists():
+        return [base / "detections.csv"]
+    parts = sorted(base.glob("part_*/detections.csv"))
+    if not parts:
+        raise SystemExit(f"No detections in {base} (run tools/detect.py first)")
+    return parts
+
+
+def combine(paths, key):
+    """Rows of several CSV files in frame order; rows of overlapping parts only once."""
+    seen, rows = set(), []
+    for path in paths:
+        for r in read_csv(path):
+            k = tuple(r.get(c) for c in key)
+            if k not in seen:
+                seen.add(k)
+                rows.append(r)
+    return sorted(rows, key=lambda r: int(r["frame"]))
 
 
 class Trajectory:
@@ -275,8 +298,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("video", help="the video (for thumbnails and links)")
     parser.add_argument("--trajectory", required=True, help="per-frame trajectory CSV from fix_picker.html")
-    parser.add_argument("--detections", type=Path, help="default data/detect/<video>/detections.csv")
-    parser.add_argument("--guardrails", type=Path, help="default data/detect/<video>/guardrails.csv")
+    parser.add_argument("--detections", type=Path, nargs="+",
+                        help="default data/detect/<video>/detections.csv, or all part_*/detections.csv of partial runs")
+    parser.add_argument("--guardrails", type=Path, nargs="+", help="default: guardrails.csv next to each detections file")
     parser.add_argument("--out", type=Path, help="default data/objects/<video>")
     parser.add_argument("--min-hits", type=int, default=3, help="minimum detections per object (default 3)")
     parser.add_argument("--max-gap", type=int, default=2, help="evaluated frames an object may be missed (default 2)")
@@ -292,14 +316,20 @@ def main():
     args = parser.parse_args()
 
     video = Path(args.video)
-    det_path = args.detections or ROOT / "data" / "detect" / video.stem / "detections.csv"
-    rail_path = args.guardrails or det_path.with_name("guardrails.csv")
+    det_paths = args.detections or default_detections(ROOT / "data" / "detect" / video.stem)
+    rail_paths = args.guardrails or [d.with_name("guardrails.csv") for d in det_paths]
+    for path in det_paths + (args.guardrails or []):
+        if not path.exists():
+            raise SystemExit(f"File not found: {path}")
+    det_rows = combine(det_paths, key=("frame", "class", "x1", "y1"))
+    rail_rows = combine([r for r in rail_paths if r.exists()], key=("frame",))
+    rail_path = ", ".join(str(r) for r in rail_paths)
     out_dir = args.out or ROOT / "data" / "objects" / video.stem
     out_dir.mkdir(parents=True, exist_ok=True)
     traj = Trajectory(args.trajectory)
 
     dets = []
-    for r in read_csv(det_path):
+    for r in det_rows:
         if r["class"] not in GROUPS:
             continue
         x1, y1, x2, y2 = (float(r[k]) for k in ("x1", "y1", "x2", "y2"))
@@ -313,7 +343,7 @@ def main():
     step = int(np.median(np.diff(frames))) if len(frames) > 1 else 1
     width = max(d["x2"] for d in dets) + 1
     height = image_height(video) or max(d["y2"] for d in dets) + 1
-    has_elongation = "elongation" in read_csv(det_path)[0]
+    has_elongation = "elongation" in det_rows[0]
     min_elongation = args.pole_min_elongation if has_elongation else 1.5
 
     objects = []
@@ -363,9 +393,6 @@ def main():
         o["station"] = p["station"]
         o["lon"], o["lat"], o["axis_dist"] = place(p, o["side"], EDGE_M[o["group"]], args.road_width)
 
-    if args.guardrails and not rail_path.exists():
-        raise SystemExit(f"Guardrail file not found: {rail_path}")
-    rail_rows = read_csv(rail_path) if rail_path.exists() else []
     sections, near = guardrail_sections(rail_rows, traj, args.rail_px, min_len=20, max_gap_m=15,
                                         lead_m=args.rail_lead) if rail_rows else ([], False)
 

@@ -106,6 +106,17 @@ little more than 720p; a higher `--work-height` (e.g. 1080) can find even
 smaller objects at roughly proportional extra time. Coordinates in the
 results are always in pixels of the original video.
 
+Long videos can be processed in parts, e.g. Swiss and Austrian section:
+
+```bash
+python tools/detect.py videos/long.mp4 --step 3 --end 41:30
+python tools/detect.py videos/long.mp4 --step 3 --start 41:30
+```
+
+Times as seconds, `mm:ss` or `h:mm:ss`. Each part goes to its own folder
+`data/detect/<video>/part_<start>-<end>/`; `track.py` combines all parts
+automatically (overlapping frames are counted once).
+
 Results in `data/detect/<video>/`: `detections.csv`, `guardrails.csv`
 (guardrail pixels left/right per frame), overlay images and `index.html`, a
 contact sheet that can be filtered by class; via `serve.py`

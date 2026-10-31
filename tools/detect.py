@@ -8,6 +8,10 @@ the model often uses for guardrails in curves and shade).
 
     python tools/detect.py videos/brenner.mp4 --step 3 --trajectory data/brenner_trajectory.csv
 
+Long videos can be processed in parts (--start/--end); each part is written to
+its own folder data/detect/<video>/part_<start>-<end>/, and tools/track.py
+combines them.
+
 Writes to data/detect/<video>/:
     detections.csv   one row per region and frame (+ station/position from the trajectory)
     guardrails.csv   guardrail presence left/right per frame
@@ -47,6 +51,14 @@ CLASSES = {
 RAIL_CLASSES = ("guardrail", "barrier")  # both count as road restraint in guardrails.csv
 MIN_AREA = {"guardrail": 400, "barrier": 400}  # pixels; default below
 DEFAULT_MIN_AREA = 30
+
+
+def parse_time(text):
+    """Seconds from "95", "95.5", "1:35" or "1:01:35"."""
+    secs = 0.0
+    for part in str(text).split(":"):
+        secs = secs * 60 + float(part)
+    return secs
 
 
 def load_model(device):
@@ -171,8 +183,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("video")
     parser.add_argument("--step", type=int, default=10, help="evaluate every n-th frame (default 10)")
-    parser.add_argument("--start", type=float, default=0, help="start time in s")
-    parser.add_argument("--end", type=float, default=None, help="end time in s")
+    parser.add_argument("--start", type=parse_time, default=0, help="start time: seconds, mm:ss or h:mm:ss")
+    parser.add_argument("--end", type=parse_time, default=None, help="end time: seconds, mm:ss or h:mm:ss")
     parser.add_argument("--batch", type=int, default=4, help="frames per model call (GPU)")
     parser.add_argument("--work-height", type=int, default=720,
                         help="frames are scaled down to this height for the model (default 720; higher finds smaller objects, but is slower)")
@@ -186,6 +198,9 @@ def main():
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     video = Path(args.video)
     out_dir = args.out or ROOT / "data" / "detect" / video.stem
+    if not args.out and (args.start or args.end):
+        # partial runs go to their own folder; track.py combines all part_* folders
+        out_dir = out_dir / f"part_{args.start:07.1f}-{f'{args.end:07.1f}' if args.end is not None else 'end'}"
     (out_dir / "overlays").mkdir(parents=True, exist_ok=True)
     trajectory = load_trajectory(args.trajectory) if args.trajectory else None
     try:
