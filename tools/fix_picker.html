@@ -848,9 +848,14 @@ async function initRoadSource() {
 }
 initRoadSource();
 
-// ?video=/videos/brenner.mp4  (served by tools/serve.py, which supports seeking)
-const param = new URLSearchParams(location.search).get('video');
-if (param) loadVideo(param, decodeURIComponent(param.split('/').pop()));
+// ?video=/videos/brenner.mp4&t=12.3  (served by tools/serve.py, which supports seeking)
+const params = new URLSearchParams(location.search);
+const param = params.get('video');
+if (param) {
+  loadVideo(param, decodeURIComponent(param.split('/').pop()));
+  const t = parseFloat(params.get('t'));
+  if (isFinite(t)) video.addEventListener('loadedmetadata', () => { video.currentTime = t; }, { once: true });
+}
 </script>
 </body>
 </html>

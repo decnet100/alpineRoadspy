@@ -78,6 +78,37 @@ dialog or drag & drop. Map tiles and the WFS fallback need internet access.
 - `<video>_trajectory.csv` — position for every frame:
   `frame,video_time_s,lon,lat,station_m,heading_deg,speed_kmh,mode`
 
+## Detecting roadside features (first pass)
+
+`tools/detect.py` runs a Mapillary Vistas segmentation model (Mask2Former,
+Swin-L) on every n-th frame and turns traffic signs, poles (delineator posts
+show up as "Pole"), street lights and guardrails into regions with bounding
+boxes. With the per-frame trajectory from the fix picker every region gets
+station and position.
+
+Setup on a machine with an NVIDIA GPU (pick the CUDA build matching the
+driver on <https://pytorch.org>):
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+pip install transformers opencv-python
+```
+
+```bash
+python tools/detect.py videos/brenner.mp4 --step 3 --trajectory data/brenner_trajectory.csv
+```
+
+Results in `data/detect/<video>/`: `detections.csv`, `guardrails.csv`
+(guardrail pixels left/right per frame), overlay images and `index.html`, a
+contact sheet that can be filtered by class; via `serve.py`
+(`http://localhost:8000/data/detect/brenner/index.html`) a click opens the
+frame in the fix picker. The model (about 0.9 GB) is downloaded once from
+Hugging Face; Mapillary Vistas models are licensed for non-commercial use.
+
+Not done yet: tracking across frames (one row per physical object),
+compensating camera roll for the left/right decision, sign type
+classification, a dedicated delineator detector.
+
 ## Layout
 
 ```

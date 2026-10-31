@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-detect = ["ultralytics"]
+detect = ["torch", "transformers"]
 terrain = ["rasterio"]
 
 [tool.setuptools.packages.find]
