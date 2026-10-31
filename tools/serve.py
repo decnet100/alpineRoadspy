@@ -41,7 +41,8 @@ class RoadSource:
         layers = [name for name, gtype in pyogrio.list_layers(self.path) if gtype and "LINE" in gtype.upper()]
         if not layers:
             raise SystemExit(f"No line layer in {path}")
-        self.layer = next((n for n in layers if "linknetz" in n.lower()), layers[0])
+        # GIP: the routable LINK layer (GIP_LINKNETZ_OGD in older exports), not EDGE
+        self.layer = next((n for n in layers if n.lower() == "link" or "linknetz" in n.lower()), layers[0])
         info = pyogrio.read_info(self.path, layer=self.layer)
         self.fields = {f.upper(): f for f in info["fields"]}
         crs = CRS.from_user_input(info["crs"])

@@ -23,10 +23,11 @@ COLUMNS = ["LINK_ID", "FROM_NODE", "TO_NODE", "NAME1", "NAME2", "EDGECAT", "FRC"
 
 
 def find_link_layer(path):
+    """The routable link layer: LINK in the current export, GIP_LINKNETZ_OGD in older ones."""
     layers = [name for name, _ in pyogrio.list_layers(path)]
-    matches = [name for name in layers if "linknetz" in name.lower()]
+    matches = [n for n in layers if n.lower() == "link"] + [n for n in layers if "linknetz" in n.lower()]
     if not matches:
-        raise SystemExit(f"No LINKNETZ layer in {path}; layers: {', '.join(layers)}")
+        raise SystemExit(f"No LINK/LINKNETZ layer in {path}; layers: {', '.join(layers)}")
     return matches[0]
 
 
@@ -42,6 +43,8 @@ def main():
     fields = {f.upper(): f for f in info["fields"]}
     columns = [fields[c] for c in COLUMNS if c in fields]
     missing = [c for c in COLUMNS if c not in fields]
+    if {"FROM_NODE", "TO_NODE"} & set(missing):
+        raise SystemExit(f"Layer {layer} has no FROM_NODE/TO_NODE; fields: {', '.join(info['fields'])}")
     if missing:
         print(f"Note: columns not in source: {', '.join(missing)}")
 
