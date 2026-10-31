@@ -218,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# alpineRoadspy: local data, footage and model weights stay out of git
+data/
+*.mp4
+*.MP4
+*.mov
+*.MOV
+*.pt
+runs/
