@@ -28,7 +28,36 @@ Concept phase. Available so far: a browser tool for setting position fixes.
 
 `tools/fix_picker.html` shows the video next to a map. Pause at a
 recognisable spot (hairpin, bridge, km post), click the map, and a fix with
-the current video time is stored. Export as CSV or GeoJSON.
+the current video time is stored.
+
+Each fix is snapped to the nearest road within the snap radius. Between two
+fixes the shortest path through the road network is used — also across road
+changes (car park → ramp → B road → L road) — and the position is
+interpolated along it at constant speed, including the lateral offset of the
+clicked points. After the last fix the position keeps moving along the road
+at the last measured speed (orange); as long as it stays in sync with the
+video, no further fix is needed. Implausible speeds are flagged in the table.
+
+### Road network
+
+| Source | Use |
+|---|---|
+| **GIP** (local file, default) | routable link network of Austria, split at every junction |
+| Tirol Verkehrswege (WFS, Land Tirol) | fallback without local file, Tyrol only |
+| swissTLM3D (swisstopo) | Switzerland |
+
+Prepare the GIP once: download `B_gip_network_ogd.zip` (about 4 GB) from
+<https://open.gip.gv.at/ogd/>, unzip it and extract the link network, e.g.
+clipped to Tyrol:
+
+```bash
+python tools/prepare_gip.py path/to/gip_network_ogd.gpkg --bbox 10.0,46.6,13.1,47.8
+```
+
+This writes `data/roads/gip_linknetz.gpkg`, which `serve.py` picks up
+automatically (any other line file: `--roads path`). Needs `geopandas`.
+
+### Running
 
 ```bash
 python tools/serve.py videos/brenner.mp4
@@ -37,15 +66,15 @@ python tools/serve.py videos/brenner.mp4
 Then open the printed URL (`http://localhost:8000/tools/fix_picker.html?video=/videos/brenner.mp4`).
 The server only binds to localhost and supports seeking in the video; the
 video never leaves the machine. A video can also be opened via the file
-dialog or drag & drop. The map tiles (basemap.at, Tirol orthophoto,
-swisstopo, OSM, OpenTopoMap, Esri imagery) need internet access.
+dialog or drag & drop. Map tiles and the WFS fallback need internet access.
 
-Export format (`<video>_fixes.csv`, WGS84):
+### Exports (WGS84)
 
-```
-video_time_s,frame,lon,lat,sigma_m,note
-12.345,370,11.3912345,47.2201234,5,Kehre 1
-```
+- `<video>_fixes.csv` — the fixes:
+  `video_time_s,frame,lon,lat,sigma_m,note,station_m,offset_m,road`
+- `<video>_fixes.geojson` — fixes plus the routed path between them
+- `<video>_trajectory.csv` — position for every frame:
+  `frame,video_time_s,lon,lat,station_m,heading_deg,speed_kmh,mode`
 
 ## Layout
 

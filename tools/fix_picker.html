@@ -7,6 +7,7 @@
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="roadnet.js"></script>
 <style>
   html, body { margin: 0; height: 100%; font: 13px system-ui, sans-serif; color: #222; }
   #app { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); height: 100vh; }
@@ -22,18 +23,23 @@
   button:hover, label.btn:hover { background: #e6e6e6; }
   label.btn input { display: none; }
   #time { font-family: ui-monospace, monospace; min-width: 21ch; }
-  input[type=number] { width: 5em; }
+  #posInfo { color: #444; }
+  #posInfo.extra { color: #e65100; font-weight: 600; }
+  input[type=number] { width: 4.5em; }
   #fixTableWrap { flex: 1 1 auto; overflow: auto; }
   table { border-collapse: collapse; width: 100%; }
   th, td { padding: 2px 6px; border-bottom: 1px solid #eee; text-align: right; white-space: nowrap; }
   th { position: sticky; top: 0; background: #f7f7f7; font-weight: 600; }
   td.note, th.note { text-align: left; width: 100%; }
+  td.road, th.road { text-align: left; max-width: 16em; overflow: hidden; text-overflow: ellipsis; }
+  td.road.cycle { cursor: pointer; text-decoration: underline dotted; }
   td input { font: inherit; width: 100%; box-sizing: border-box; border: 1px solid transparent; background: transparent; }
   td input:focus, td input:hover { border-color: #aaa; background: #fff; }
-  td input.sigma { width: 4.5em; text-align: right; }
+  td input.sigma { width: 4em; text-align: right; }
   tr.sel td { background: #ffeaa0; }
   tr:hover td { background: #f3f8ff; }
   .warn { color: #c00; font-weight: 600; }
+  .soft { color: #c62828; }
   #status { padding: 4px 8px; color: #555; border-top: 1px solid #ddd; min-height: 1.3em; }
   #map { height: 100%; }
   .fix-icon div { width: 22px; height: 22px; border-radius: 50%; background: #1565c0; color: #fff;
@@ -66,28 +72,38 @@
       </select>
       <span id="time">–</span>
       <label>fps <input id="fps" type="number" min="1" max="240" step="any" value="30"></label>
+      <span id="posInfo"></span>
     </div>
     <div class="bar">
       <label><input id="pickMode" type="checkbox" checked> Klick in Karte setzt Fixpunkt</label>
       <label>σ <input id="sigmaDefault" type="number" min="0" step="any" value="5"> m</label>
+      <label>Straßennetz <select id="roadSource"></select></label>
+      <label>Fangradius <input id="snapRadius" type="number" min="1" step="any" value="15"> m</label>
+    </div>
+    <div class="bar">
       <label class="btn">Referenzlinie… <input id="refFile" type="file" accept=".gpx,.geojson,.json"></label>
       <label class="btn">Fixpunkte laden… <input id="fixFile" type="file" accept=".csv,.geojson,.json"></label>
-      <button id="bExportCsv">Export CSV</button>
+      <button id="bExportCsv">Export Fixpunkte CSV</button>
       <button id="bExportGeojson">Export GeoJSON</button>
+      <button id="bExportTraj">Export Trajektorie (je Frame)</button>
       <button id="bClear">Alle löschen</button>
     </div>
     <details>
       <summary>Bedienung</summary>
       <kbd>Leertaste</kbd> Play/Pause · <kbd>←</kbd>/<kbd>→</kbd> 1 Frame · <kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> 1 s ·
       <kbd>Strg</kbd>+<kbd>←</kbd>/<kbd>→</kbd> 10 s · <kbd>Entf</kbd> gewählten Fixpunkt löschen ·
-      <kbd>N</kbd>/<kbd>P</kbd> nächster/vorheriger Fixpunkt.<br>
+      <kbd>N</kbd>/<kbd>P</kbd> nächster/vorheriger Fixpunkt · <kbd>R</kbd> andere Straße für gewählten Fixpunkt.<br>
       Klick in die Karte setzt einen Fixpunkt zur aktuellen Videozeit (existiert dort schon einer, wird er verschoben).
-      Marker lassen sich ziehen; Klick auf Marker oder Tabellenzeile springt im Video dorthin.
-      Rote Markierung = zwischen Fixpunkten linear interpolierte Position. Fixpunkte werden je Video im Browser zwischengespeichert.
+      Jeder Fixpunkt wird auf die nächste Straße im Fangradius bezogen; zwischen zwei Fixpunkten wird der kürzeste Weg
+      im Straßennetz gesucht (auch über Straßenwechsel) und die Position mit konstanter Geschwindigkeit entlang dieses
+      Weges interpoliert, inkl. seitlichem Versatz. Nach dem letzten Fixpunkt läuft die Position mit der zuletzt
+      gemessenen Geschwindigkeit entlang der Straße weiter (orange) – solange sie mit dem Video synchron bleibt,
+      braucht es keinen neuen Fixpunkt. Fixpunkte werden je Video im Browser zwischengespeichert.
     </details>
     <div id="fixTableWrap">
       <table>
-        <thead><tr><th>#</th><th>Zeit [s]</th><th>Frame</th><th>Δt [s]</th><th>Δs [m]</th><th>v [km/h]</th><th>σ [m]</th><th class="note">Notiz</th><th></th></tr></thead>
+        <thead><tr><th>#</th><th>Zeit [s]</th><th>Frame</th><th>Δt [s]</th><th>Weg [m]</th><th>v [km/h]</th>
+          <th>Station [m]</th><th class="road">Straße</th><th>σ [m]</th><th class="note">Notiz</th><th></th></tr></thead>
         <tbody id="fixRows"></tbody>
       </table>
     </div>
@@ -129,20 +145,26 @@ const baseLayers = {
 
 const refLayer = L.featureGroup();
 const fixLayer = L.featureGroup();
-const pathLayer = L.polyline([], { color: '#1565c0', weight: 2, opacity: 0.7, dashArray: '4 4' });
+const routeLayer = L.featureGroup();
+const snapLayer = L.featureGroup();
+const extLayer = L.featureGroup();
+const lineLayer = L.polyline([], { color: '#1565c0', weight: 2, opacity: 0.7, dashArray: '4 4' });
 const posMarker = L.circleMarker([0, 0], { radius: 7, color: '#fff', weight: 2, fillColor: '#e53935', fillOpacity: 1 });
 const overlays = {
   'basemap.at Beschriftung': L.tileLayer(AT, opts({ layer: 'bmapoverlay', style: 'normal', ext: 'png', maxNativeZoom: 19, attribution: attrAT })),
   'Referenzlinie': refLayer,
+  'Route im Straßennetz': routeLayer,
+  'Straßenbezug der Fixpunkte': snapLayer,
+  'Extrapolation': extLayer,
   'Fixpunkte': fixLayer,
-  'Verbindung Fixpunkte': pathLayer,
+  'Luftlinie zwischen Fixpunkten': lineLayer,
 };
 
 const map = L.map('map', { zoomControl: true }).setView([47.2, 11.4], 11);
 const savedBase = localStorage.getItem('fixpicker:base');
 (baseLayers[savedBase] || baseLayers['AT · basemap.at Orthofoto']).addTo(map);
-[refLayer, fixLayer, pathLayer].forEach((l) => l.addTo(map));
-L.control.layers(baseLayers, overlays, { collapsed: false }).addTo(map);
+[refLayer, routeLayer, extLayer, snapLayer, fixLayer].forEach((l) => l.addTo(map));
+L.control.layers(baseLayers, overlays, { collapsed: true }).addTo(map);
 L.control.scale({ imperial: false }).addTo(map);
 map.on('baselayerchange', (e) => localStorage.setItem('fixpicker:base', e.name));
 
@@ -157,25 +179,22 @@ map.on('mousemove', (e) => {
 
 const video = document.getElementById('video');
 const $ = (id) => document.getElementById(id);
-const state = { videoName: null, fixes: [], selected: null, nextId: 1 };
+// fixes: { id, t, lat, lon, sigma, note, snapIdx } + derived: snap, cands, station, offset
+// routes[i]: path between fixes i and i+1: { path: RoadNet.Path, ok, roads, offA, offB }
+const state = { videoName: null, fixes: [], routes: [], ext: null, selected: null, nextId: 1 };
 let fpsUserSet = false;
 
 function fps() { return Math.max(1, parseFloat($('fps').value) || 30); }
 function frameOf(t) { return Math.floor(t * fps() + 1e-3); }
 function status(msg) { $('status').textContent = msg; }
-
-function haversine(a, b) {
-  const R = 6371008.8, rad = Math.PI / 180;
-  const dLat = (b.lat - a.lat) * rad, dLon = (b.lon - a.lon) * rad;
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(h));
-}
+const dist = (a, b) => RoadNet.haversine(a.lat, a.lon, b.lat, b.lon);
 
 function storageKey() { return state.videoName ? 'fixpicker:fixes:' + state.videoName : null; }
 
 function save() {
   const key = storageKey();
-  if (key) localStorage.setItem(key, JSON.stringify({ fps: fps(), fixes: state.fixes }));
+  const fixes = state.fixes.map(({ t, lat, lon, sigma, note, snapIdx }) => ({ t, lat, lon, sigma, note, snapIdx }));
+  if (key) localStorage.setItem(key, JSON.stringify({ fps: fps(), fixes }));
 }
 
 function restore() {
@@ -190,7 +209,8 @@ function restore() {
 
 function setFixes(fixes) {
   state.fixes = fixes.map((f) => ({ id: state.nextId++, t: +f.t, lat: +f.lat, lon: +f.lon,
-                                   sigma: f.sigma === '' || f.sigma == null ? 5 : +f.sigma, note: f.note || '' }));
+                                   sigma: f.sigma === '' || f.sigma == null ? 5 : +f.sigma, note: f.note || '',
+                                   snapIdx: +f.snapIdx || 0 }));
   state.selected = null;
   refresh();
 }
@@ -203,10 +223,10 @@ function addOrMoveFix(latlng) {
   const t = video.currentTime;
   let fix = state.fixes.find((f) => Math.abs(f.t - t) < 0.5 / fps());
   if (fix) {
-    fix.lat = latlng.lat; fix.lon = latlng.lng;
+    Object.assign(fix, { lat: latlng.lat, lon: latlng.lng, snapIdx: 0 });
     status(`Fixpunkt bei ${t.toFixed(3)} s verschoben.`);
   } else {
-    fix = { id: state.nextId++, t, lat: latlng.lat, lon: latlng.lng, sigma: parseFloat($('sigmaDefault').value) || 5, note: '' };
+    fix = { id: state.nextId++, t, lat: latlng.lat, lon: latlng.lng, sigma: parseFloat($('sigmaDefault').value) || 5, note: '', snapIdx: 0 };
     state.fixes.push(fix);
     status(`Fixpunkt bei ${t.toFixed(3)} s gesetzt.`);
   }
@@ -224,15 +244,26 @@ function selectFix(id, seek = true) {
   state.selected = id;
   const fix = state.fixes.find((f) => f.id === id);
   if (fix && seek) { video.pause(); video.currentTime = fix.t; }
+  renderMarkers();
+  renderTable();
+}
+
+function cycleRoad(fix) {
+  if (!fix || !(fix.cands > 1)) return;
+  fix.snapIdx = (fix.snapIdx + 1) % fix.cands;
   refresh();
 }
 
 function refresh() {
   sortFixes();
+  state.routes = [];   // stale until routing has run for the current fixes
+  state.ext = null;
   renderMarkers();
+  renderRoutes();
   renderTable();
   updatePosition();
   save();
+  scheduleRouting();
 }
 
 function renderMarkers() {
@@ -242,50 +273,283 @@ function renderMarkers() {
                              html: `<div>${i + 1}</div>`, iconSize: [22, 22] });
     const m = L.marker([f.lat, f.lon], { icon, draggable: true, title: `${f.t.toFixed(3)} s ${f.note}` });
     m.on('click', () => selectFix(f.id));
-    m.on('dragend', () => { const ll = m.getLatLng(); f.lat = ll.lat; f.lon = ll.lng; state.selected = f.id; refresh(); });
+    m.on('dragend', () => { const ll = m.getLatLng(); Object.assign(f, { lat: ll.lat, lon: ll.lng, snapIdx: 0 }); state.selected = f.id; refresh(); });
     fixLayer.addLayer(m);
   });
-  pathLayer.setLatLngs(state.fixes.map((f) => [f.lat, f.lon]));
+  lineLayer.setLatLngs(state.fixes.map((f) => [f.lat, f.lon]));
+}
+
+function renderRoutes() {
+  routeLayer.clearLayers();
+  snapLayer.clearLayers();
+  extLayer.clearLayers();
+  state.routes.forEach((r) => {
+    L.polyline(r.path.coords, r.ok ? { color: '#2e7d32', weight: 5, opacity: 0.55 }
+                                   : { color: '#c62828', weight: 3, opacity: 0.8, dashArray: '6 6' })
+      .bindTooltip(r.ok ? r.roads.join(' › ') : 'keine Verbindung im Straßennetz – Luftlinie', { sticky: true })
+      .addTo(routeLayer);
+  });
+  state.fixes.forEach((f) => {
+    if (!f.snap) return;
+    L.polyline([[f.lat, f.lon], [f.snap.lat, f.snap.lon]], { color: '#2e7d32', weight: 1.5 }).addTo(snapLayer);
+    L.circleMarker([f.snap.lat, f.snap.lon], { radius: 3, color: '#2e7d32', fillOpacity: 1 }).addTo(snapLayer);
+  });
+  if (state.ext) L.polyline(state.ext.path.coords, { color: '#ef6c00', weight: 4, opacity: 0.7, dashArray: '8 6' }).addTo(extLayer);
 }
 
 function renderTable() {
   const tbody = $('fixRows');
   tbody.innerHTML = '';
+  const routed = state.routes.length === state.fixes.length - 1 && state.fixes.length > 1;
+  const roadsOn = ROAD_PROVIDERS[$('roadSource').value]?.fetch;
   state.fixes.forEach((f, i) => {
     const prev = state.fixes[i - 1];
+    const r = routed ? state.routes[i - 1] : null;
     const dt = prev ? f.t - prev.t : null;
-    const ds = prev ? haversine(prev, f) : null;
+    const ds = prev ? (r ? r.path.length : dist(prev, f)) : null;
     const v = prev && dt > 0 ? ds / dt * 3.6 : null;
     const tr = document.createElement('tr');
     if (f.id === state.selected) tr.className = 'sel';
+    let road = '', roadTitle = '';
+    if (f.snap) {
+      road = (f.snap.name || '(ohne Name)') + (f.cands > 1 ? ` (${f.snapIdx + 1}/${f.cands})` : '');
+      roadTitle = `Abstand ${f.snap.dist.toFixed(1)} m, seitlicher Versatz ${f.offset == null ? '–' : f.offset.toFixed(1) + ' m'}` +
+                  (f.cands > 1 ? ' – Klick: andere Straße' : '');
+    } else if (roadsOn && f.cands === 0) {
+      road = '— nichts im Fangradius';
+    }
+    const wayTitle = r ? (r.ok ? 'via ' + r.roads.join(' › ') : 'keine Verbindung im Straßennetz gefunden – Luftlinie') : 'Luftlinie';
     tr.innerHTML = `<td>${i + 1}</td><td>${f.t.toFixed(3)}</td><td>${frameOf(f.t)}</td>
-      <td>${dt == null ? '' : dt.toFixed(1)}</td><td>${ds == null ? '' : ds.toFixed(0)}</td>
+      <td>${dt == null ? '' : dt.toFixed(1)}</td>
+      <td class="${r && !r.ok ? 'soft' : ''}" title="${wayTitle}">${ds == null ? '' : (r && r.ok ? '' : '≈') + ds.toFixed(0)}</td>
       <td class="${v != null && v > 130 ? 'warn' : ''}">${v == null ? '' : v.toFixed(0)}</td>
+      <td>${routed && f.station != null ? f.station.toFixed(0) : ''}</td>
+      <td class="road${f.cands > 1 ? ' cycle' : ''}" title="${roadTitle}"></td>
       <td><input class="sigma" type="number" min="0" step="any"></td>
       <td class="note"><input class="note" type="text" placeholder="z. B. Kehre, Brücke, km-Tafel"></td>
       <td><button title="löschen">✕</button></td>`;
+    tr.querySelector('td.road').textContent = road;
     const [sigmaIn, noteIn] = tr.querySelectorAll('input');
     sigmaIn.value = f.sigma;
     noteIn.value = f.note;
     sigmaIn.addEventListener('change', () => { f.sigma = parseFloat(sigmaIn.value) || 0; save(); });
     noteIn.addEventListener('change', () => { f.note = noteIn.value; save(); renderMarkers(); });
     tr.querySelector('button').addEventListener('click', (e) => { e.stopPropagation(); deleteFix(f.id); });
+    tr.querySelector('td.road').addEventListener('click', (e) => { e.stopPropagation(); cycleRoad(f); });
     tr.addEventListener('click', (e) => { if (e.target.tagName !== 'INPUT') selectFix(f.id); });
     tbody.appendChild(tr);
   });
 }
 
-function interpolate(t) {
-  const fx = state.fixes;
-  if (fx.length === 0 || t < fx[0].t || t > fx[fx.length - 1].t) return null;
-  for (let i = 1; i < fx.length; i++) {
-    if (t <= fx[i].t) {
-      const a = fx[i - 1], b = fx[i];
-      const w = b.t > a.t ? (t - a.t) / (b.t - a.t) : 0;
-      return [a.lat + w * (b.lat - a.lat), a.lon + w * (b.lon - a.lon)];
+// ---------- road network ----------
+
+const TIROL_WFS = 'https://dservices3.arcgis.com/hG7UfxX49PQ8XkXh/arcgis/services/Verkehrswege/WFSServer';
+const SWISS_IDENTIFY = 'https://api3.geo.admin.ch/rest/services/api/MapServer/identify';
+
+async function getJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+const lineParts = (g) => !g ? [] : g.type === 'LineString' ? [g.coordinates] : g.type === 'MultiLineString' ? g.coordinates : [];
+const toLatLon = (pts) => pts.map((p) => [p[1], p[0]]);
+
+// GIP link network (or another line file) served by tools/serve.py --roads
+async function fetchLocal(b) {
+  const gj = await getJson(`/api/roads?bbox=${b.w},${b.s},${b.e},${b.n}`);
+  if (gj.error) throw new Error(gj.error);
+  return gj.features.map((f) => {
+    const p = f.properties;
+    return { id: 'l' + p.id, coords: toLatLon(f.geometry.coordinates), name: p.name || p.category || '',
+             cost: p.cost || 1, from: p.from, to: p.to };
+  });
+}
+
+// Land Tirol "Verkehrswege" (L + B roads, local roads, farm/forest roads). Not split at
+// every junction, so topology comes from shared vertices; bridges/tunnels and motorways
+// only connect at their ends / via ramps (see roadnet.js).
+async function fetchTirol(b) {
+  const segs = [], page = 2000;
+  for (let start = 0; start < 50000; start += page) {
+    const url = `${TIROL_WFS}?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature&TYPENAMES=Verkehrswege:Verkehrswege` +
+      `&OUTPUTFORMAT=GEOJSON&SRSNAME=urn:ogc:def:crs:EPSG::4326&COUNT=${page}&STARTINDEX=${start}` +
+      `&BBOX=${b.s},${b.w},${b.n},${b.e},urn:ogc:def:crs:EPSG::4326`;
+    const gj = await getJson(url);
+    for (const f of gj.features) {
+      const p = f.properties;
+      if (p.OBJEKT.startsWith('B-')) continue;   // railways
+      const name = p.STRNAME_HOCHRANGIG || p.STRNAME || p.OBJEKTBEZEICHNUNG || '';
+      lineParts(f.geometry).forEach((pts, k) => segs.push({
+        id: `t${f.id}/${k}`, coords: toLatLon(pts), name, cost: p.OBJEKT === 'S-FRW' ? 3 : 1,
+        structure: !!p.KUNSTBAUTEN, level: p.OBJEKT === 'S-A' ? 'motorway' : p.OBJEKT === 'S-AR' ? 'ramp' : undefined,
+      }));
+    }
+    if (gj.features.length < page) break;
+  }
+  return segs;
+}
+
+async function fetchSwiss(b) {
+  const segs = [], page = 200;
+  for (let offset = 0; offset < 10000; offset += page) {
+    const url = `${SWISS_IDENTIFY}?geometryType=esriGeometryEnvelope&geometry=${b.w},${b.s},${b.e},${b.n}&sr=4326` +
+      `&tolerance=0&layers=all:ch.swisstopo.swisstlm3d-strassen&returnGeometry=true&geometryFormat=geojson` +
+      `&limit=${page}&offset=${offset}`;
+    const res = (await getJson(url)).results || [];
+    for (const f of res) {
+      lineParts(f.geometry).forEach((pts, k) => segs.push({
+        id: `c${f.featureId}/${k}`, coords: toLatLon(pts), name: f.properties.strassenname || f.properties.label || '',
+      }));
+    }
+    if (res.length < page) break;
+  }
+  return segs;
+}
+
+const ROAD_PROVIDERS = {
+  local: { label: 'GIP (lokal, serve.py)', fetch: fetchLocal },
+  tirol: { label: 'Tirol Verkehrswege (WFS)', fetch: fetchTirol },
+  ch: { label: 'swissTLM3D (CH)', fetch: fetchSwiss },
+  off: { label: 'aus (Luftlinie)', fetch: null },
+};
+
+const roads = { net: new RoadNet.Network(), boxes: [] };
+
+function resetRoads() { roads.net = new RoadNet.Network(); roads.boxes = []; }
+
+function corridor(a, b, margin) {
+  const mLat = margin / 111320, mLon = margin / (111320 * Math.cos(a.lat * Math.PI / 180));
+  return { s: Math.min(a.lat, b.lat) - mLat, n: Math.max(a.lat, b.lat) + mLat,
+           w: Math.min(a.lon, b.lon) - mLon, e: Math.max(a.lon, b.lon) + mLon };
+}
+const inside = (b, o) => b.s >= o.s && b.n <= o.n && b.w >= o.w && b.e <= o.e;
+
+async function ensureRoads(provider, box) {
+  if (roads.boxes.some((o) => inside(box, o))) return;
+  status('Lade Straßennetz …');
+  roads.net.addSegments(await provider.fetch(box));
+  roads.boxes.push(box);
+  status(`Straßennetz: ${roads.net.size} Abschnitte geladen.`);
+}
+
+function snapFix(f, radius) {
+  const cands = roads.net.size ? roads.net.snap(f.lat, f.lon, radius) : [];
+  f.cands = cands.length;
+  f.snapIdx = cands.length ? (f.snapIdx || 0) % cands.length : 0;
+  f.snap = cands[f.snapIdx] || null;
+}
+
+function routePair(a, b) {
+  const straight = dist(a, b);
+  if (a.snap && b.snap) {
+    const r = roads.net.route(a.snap, b.snap, Math.max(4 * straight, straight + 3000));
+    if (r && r.coords.length > 1) {
+      const path = new RoadNet.Path(r.coords);
+      return { path, ok: true, roads: r.roads,
+               offA: path.offsetOf(a.lat, a.lon, 0), offB: path.offsetOf(b.lat, b.lon, path.length) };
     }
   }
-  return [fx[0].lat, fx[0].lon];
+  return { path: new RoadNet.Path([[a.lat, a.lon], [b.lat, b.lon]]), ok: false, roads: [], offA: 0, offB: 0 };
+}
+
+// Continue past the last fix with the speed measured between the last two fixes.
+function buildExtension(fixes, routes) {
+  const n = fixes.length;
+  if (n < 2) return null;
+  const a = fixes[n - 2], b = fixes[n - 1], r = routes[n - 2];
+  const dt = b.t - a.t;
+  if (dt <= 0) return null;
+  const speed = r.path.length / dt;
+  const remaining = (isFinite(video.duration) ? video.duration : b.t + 600) - b.t;
+  const length = Math.min(speed * Math.max(remaining, 0) + 50, 30000);
+  const dir = r.path.direction(r.path.length);
+  let coords;
+  if (r.ok && b.snap) {
+    coords = roads.net.extend(b.snap, dir, length);
+  } else {
+    const k = 111320, cos = Math.cos(b.lat * Math.PI / 180);
+    coords = [[b.lat, b.lon], [b.lat + dir[1] * length / k, b.lon + dir[0] * length / (k * cos)]];
+  }
+  if (coords.length < 2) return null;
+  return { path: new RoadNet.Path(coords), speed, t0: b.t, station0: b.station, offset: r.ok ? r.offB : 0 };
+}
+
+let routeGen = 0, routeTimer = null;
+function scheduleRouting() { clearTimeout(routeTimer); routeTimer = setTimeout(routeAll, 250); }
+
+async function routeAll() {
+  const gen = ++routeGen;
+  const fixes = state.fixes.slice();
+  const provider = ROAD_PROVIDERS[$('roadSource').value];
+  const radius = parseFloat($('snapRadius').value) || 15;
+  if (provider.fetch) {
+    try {
+      for (let i = 0; i < fixes.length; i++) {
+        const next = fixes[i + 1] || fixes[i];
+        await ensureRoads(provider, corridor(fixes[i], next, Math.max(300, 0.5 * dist(fixes[i], next))));
+        if (gen !== routeGen) return;
+      }
+    } catch (err) {
+      status(`Straßennetz nicht abrufbar: ${err.message}`);
+    }
+  }
+  if (gen !== routeGen) return;
+  fixes.forEach((f) => snapFix(f, radius));
+  const routes = [];
+  for (let i = 0; i + 1 < fixes.length; i++) {
+    let r = routePair(fixes[i], fixes[i + 1]);
+    if (!r.ok && provider.fetch && fixes[i].snap && fixes[i + 1].snap) {
+      // the connection may leave the corridor (hairpins, detours): retry with a wider one
+      try {
+        await ensureRoads(provider, corridor(fixes[i], fixes[i + 1], Math.max(1500, 2 * dist(fixes[i], fixes[i + 1]))));
+      } catch (err) { status(`Straßennetz nicht abrufbar: ${err.message}`); }
+      if (gen !== routeGen) return;
+      snapFix(fixes[i], radius); snapFix(fixes[i + 1], radius);
+      r = routePair(fixes[i], fixes[i + 1]);
+    }
+    routes.push(r);
+  }
+  let station = 0;
+  fixes.forEach((f, i) => {
+    f.station = station;
+    f.offset = routes[i]?.ok ? routes[i].offA : routes[i - 1]?.ok ? routes[i - 1].offB : null;
+    if (routes[i]) station += routes[i].path.length;
+  });
+  state.routes = routes;
+  state.ext = buildExtension(fixes, routes);
+  renderRoutes();
+  renderTable();
+  updatePosition();
+  const failed = routes.filter((r) => !r.ok).length;
+  if (provider.fetch && failed) status(`${failed} Abschnitt(e) ohne Verbindung im Straßennetz (rot gestrichelt).`);
+}
+
+// Position at video time t: along the routed path between fixes, extrapolated after the last one.
+function position(t) {
+  const fx = state.fixes, routes = state.routes;
+  if (fx.length < 2 || t < fx[0].t) return null;
+  const routed = routes.length === fx.length - 1;
+  if (t <= fx[fx.length - 1].t) {
+    let i = 1;
+    while (i < fx.length - 1 && fx[i].t < t) i++;
+    const a = fx[i - 1], b = fx[i];
+    const w = b.t > a.t ? (t - a.t) / (b.t - a.t) : 0;
+    if (!routed) {
+      return { lat: a.lat + w * (b.lat - a.lat), lon: a.lon + w * (b.lon - a.lon), mode: 'linear',
+               speed: b.t > a.t ? dist(a, b) / (b.t - a.t) : 0 };
+    }
+    const r = routes[i - 1];
+    const s = w * r.path.length;
+    const p = r.path.at(s, r.offA + w * (r.offB - r.offA));
+    return Object.assign(p, { station: a.station + s, speed: b.t > a.t ? r.path.length / (b.t - a.t) : 0,
+                              mode: r.ok ? 'interpoliert' : 'Luftlinie' });
+  }
+  const ext = state.ext;
+  if (!ext) return null;
+  const s = ext.speed * (t - ext.t0);
+  const p = ext.path.at(s, ext.offset);
+  return Object.assign(p, { station: ext.station0 + Math.min(s, ext.path.length), speed: ext.speed,
+                            mode: s > ext.path.length ? 'extrapoliert (Ende des Netzes)' : 'extrapoliert' });
 }
 
 function updatePosition() {
@@ -293,9 +557,19 @@ function updatePosition() {
   const dur = isFinite(video.duration) ? video.duration : 0;
   $('time').textContent = `${t.toFixed(3)} / ${dur.toFixed(1)} s · F ${frameOf(t)}`;
   if (document.activeElement !== $('seek')) $('seek').value = t;
-  const p = interpolate(t);
-  if (p) { posMarker.setLatLng(p); if (!map.hasLayer(posMarker)) posMarker.addTo(map); }
-  else if (map.hasLayer(posMarker)) map.removeLayer(posMarker);
+  const p = position(t);
+  const info = $('posInfo');
+  if (p) {
+    posMarker.setLatLng([p.lat, p.lon]);
+    const extra = p.mode.startsWith('extrapoliert');
+    posMarker.setStyle({ fillColor: extra ? '#ef6c00' : '#e53935' });
+    if (!map.hasLayer(posMarker)) posMarker.addTo(map);
+    info.textContent = `${p.mode} · ${(p.speed * 3.6).toFixed(0)} km/h` + (p.station != null ? ` · Station ${p.station.toFixed(0)} m` : '');
+    info.className = extra ? 'extra' : '';
+  } else {
+    if (map.hasLayer(posMarker)) map.removeLayer(posMarker);
+    info.textContent = '';
+  }
 }
 
 // ---------- video ----------
@@ -315,7 +589,7 @@ function loadVideo(src, name) {
   }
 }
 
-video.addEventListener('loadedmetadata', () => { $('seek').max = video.duration; updatePosition(); });
+video.addEventListener('loadedmetadata', () => { $('seek').max = video.duration; scheduleRouting(); updatePosition(); });
 video.addEventListener('timeupdate', updatePosition);
 video.addEventListener('seeked', updatePosition);
 video.addEventListener('play', () => { $('bPlay').textContent = '⏸'; });
@@ -335,7 +609,7 @@ if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
         const known = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 100, 119.88, 120];
         const snap = known.reduce((a, b) => Math.abs(b - est) < Math.abs(a - est) ? b : a);
         $('fps').value = Math.abs(snap - est) < 0.5 ? snap : est.toFixed(2);
-        refresh();
+        renderTable();
       }
     }
     last = meta;
@@ -369,7 +643,7 @@ $('bNextFrame').onclick = () => stepFrames(1);
 $('bBack1s').onclick = () => stepSeconds(-1);
 $('bFwd1s').onclick = () => stepSeconds(1);
 $('rate').onchange = () => { video.playbackRate = parseFloat($('rate').value); $('rate').blur(); };
-$('fps').onchange = () => { fpsUserSet = true; refresh(); };
+$('fps').onchange = () => { fpsUserSet = true; renderTable(); save(); };
 $('seek').addEventListener('input', () => { video.currentTime = parseFloat($('seek').value); });
 $('seek').addEventListener('change', () => $('seek').blur());
 
@@ -384,6 +658,7 @@ document.addEventListener('keydown', (e) => {
     case 'Delete': case 'Backspace': if (state.selected != null) deleteFix(state.selected); break;
     case 'n': case 'N': jumpFix(1); break;
     case 'p': case 'P': jumpFix(-1); break;
+    case 'r': case 'R': cycleRoad(state.fixes.find((f) => f.id === state.selected)); break;
     default: return;
   }
   e.preventDefault();
@@ -408,23 +683,48 @@ function download(name, text, type) {
 
 function baseName() { return (state.videoName || 'fixes').replace(/\.[^.]+$/, ''); }
 const csvQuote = (s) => /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+const num = (x, d) => x == null || !isFinite(x) ? '' : x.toFixed(d);
+const routedNow = () => state.fixes.length > 1 && state.routes.length === state.fixes.length - 1;
 
 function toCsv() {
-  const rows = ['video_time_s,frame,lon,lat,sigma_m,note'];
-  state.fixes.forEach((f) => rows.push([f.t.toFixed(3), frameOf(f.t), f.lon.toFixed(7), f.lat.toFixed(7), f.sigma, csvQuote(f.note)].join(',')));
+  const routed = routedNow();
+  const rows = ['video_time_s,frame,lon,lat,sigma_m,note,station_m,offset_m,road'];
+  state.fixes.forEach((f) => rows.push([f.t.toFixed(3), frameOf(f.t), f.lon.toFixed(7), f.lat.toFixed(7), f.sigma, csvQuote(f.note),
+    routed ? num(f.station, 1) : '', num(f.offset, 2), csvQuote(f.snap ? f.snap.name : '')].join(',')));
   return rows.join('\n') + '\n';
 }
 
 function toGeojson() {
-  return JSON.stringify({
-    type: 'FeatureCollection',
-    properties: { video: state.videoName, fps: fps() },
-    features: state.fixes.map((f) => ({
-      type: 'Feature',
-      geometry: { type: 'Point', coordinates: [+f.lon.toFixed(7), +f.lat.toFixed(7)] },
-      properties: { video_time_s: +f.t.toFixed(3), frame: frameOf(f.t), sigma_m: f.sigma, note: f.note },
-    })),
-  }, null, 1);
+  const routed = routedNow();
+  const points = state.fixes.map((f) => ({
+    type: 'Feature',
+    geometry: { type: 'Point', coordinates: [+f.lon.toFixed(7), +f.lat.toFixed(7)] },
+    properties: { video_time_s: +f.t.toFixed(3), frame: frameOf(f.t), sigma_m: f.sigma, note: f.note,
+                  station_m: routed ? +num(f.station, 1) : null, offset_m: f.offset == null ? null : +f.offset.toFixed(2),
+                  road: f.snap ? f.snap.name : null },
+  }));
+  const lines = routed ? state.routes.map((r, i) => ({
+    type: 'Feature',
+    geometry: { type: 'LineString', coordinates: r.path.coords.map(([la, lo]) => [+lo.toFixed(7), +la.toFixed(7)]) },
+    properties: { kind: 'route', from_time_s: state.fixes[i].t, to_time_s: state.fixes[i + 1].t,
+                  length_m: +r.path.length.toFixed(1), matched: r.ok, roads: r.roads.join(' › ') },
+  })) : [];
+  return JSON.stringify({ type: 'FeatureCollection', properties: { video: state.videoName, fps: fps() },
+                          features: points.concat(lines) }, null, 1);
+}
+
+function toTrajectoryCsv() {
+  const rows = ['frame,video_time_s,lon,lat,station_m,heading_deg,speed_kmh,mode'];
+  if (state.fixes.length < 2) return null;
+  const end = isFinite(video.duration) ? video.duration : state.fixes[state.fixes.length - 1].t;
+  for (let f = frameOf(state.fixes[0].t); (f + 0.5) / fps() <= end; f++) {
+    const t = (f + 0.5) / fps();
+    const p = position(t);
+    if (!p) continue;
+    rows.push([f, t.toFixed(3), p.lon.toFixed(7), p.lat.toFixed(7), num(p.station, 1), num(p.heading, 1),
+               num(p.speed * 3.6, 1), p.mode].join(','));
+  }
+  return rows.join('\n') + '\n';
 }
 
 function parseCsv(text) {
@@ -475,8 +775,8 @@ function gpxToGeojson(text) {
 function loadReference(gj, name) {
   refLayer.clearLayers();
   L.geoJSON(gj, {
-    style: { color: '#ff6d00', weight: 4, opacity: 0.6 },
-    pointToLayer: (f, ll) => L.circleMarker(ll, { radius: 3, color: '#ff6d00' }),
+    style: { color: '#7b1fa2', weight: 4, opacity: 0.6 },
+    pointToLayer: (f, ll) => L.circleMarker(ll, { radius: 3, color: '#7b1fa2' }),
   }).addTo(refLayer);
   if (refLayer.getLayers().length) map.fitBounds(refLayer.getBounds().pad(0.1));
   status(`Referenzlinie ${name} geladen.`);
@@ -516,6 +816,11 @@ $('refFile').onchange = (e) => e.target.files[0] && handleFile(e.target.files[0]
 $('fixFile').onchange = (e) => e.target.files[0] && handleFile(e.target.files[0], 'fix');
 $('bExportCsv').onclick = () => download(baseName() + '_fixes.csv', toCsv(), 'text/csv');
 $('bExportGeojson').onclick = () => download(baseName() + '_fixes.geojson', toGeojson(), 'application/geo+json');
+$('bExportTraj').onclick = () => {
+  const csv = toTrajectoryCsv();
+  if (csv) download(baseName() + '_trajectory.csv', csv, 'text/csv');
+  else status('Für eine Trajektorie braucht es mindestens zwei Fixpunkte.');
+};
 $('bClear').onclick = () => { if (state.fixes.length && confirm('Alle Fixpunkte löschen?')) setFixes([]); };
 
 $('left').addEventListener('dragover', (e) => e.preventDefault());
@@ -523,6 +828,25 @@ $('left').addEventListener('drop', (e) => {
   e.preventDefault();
   [...e.dataTransfer.files].forEach((f) => handleFile(f));
 });
+
+// ---------- road source selection ----------
+
+async function initRoadSource() {
+  const sel = $('roadSource');
+  let localOk = false;
+  try { localOk = !!(await getJson('/api/roads')).available; } catch (err) { /* served without --roads */ }
+  for (const [key, p] of Object.entries(ROAD_PROVIDERS)) {
+    const o = new Option(p.label + (key === 'local' && !localOk ? ' – nicht verfügbar' : ''), key);
+    o.disabled = key === 'local' && !localOk;
+    sel.add(o);
+  }
+  const saved = localStorage.getItem('fixpicker:roads');
+  sel.value = saved && !(saved === 'local' && !localOk) ? saved : localOk ? 'local' : 'tirol';
+  sel.onchange = () => { localStorage.setItem('fixpicker:roads', sel.value); resetRoads(); sel.blur(); scheduleRouting(); };
+  $('snapRadius').onchange = () => scheduleRouting();
+  scheduleRouting();
+}
+initRoadSource();
 
 // ?video=/videos/brenner.mp4  (served by tools/serve.py, which supports seeking)
 const param = new URLSearchParams(location.search).get('video');

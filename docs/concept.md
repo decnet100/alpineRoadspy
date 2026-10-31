@@ -19,7 +19,7 @@ offset (lane, ±2–3 m).
 |---|---|---|
 | Video | MP4/MOV | single forward-facing camera, fixed mount |
 | Position fixes | CSV: `video_time_s, frame, lon, lat, sigma_m, note` (WGS84) | manual, sparse (start/end, ~60 s), ±5 m; set with `tools/fix_picker.html` |
-| Reference centerline | GeoPackage/GeoJSON/GPX line | optional, may be inaccurate or have gaps |
+| Road network | GIP link network (local GeoPackage), Tirol WFS, swissTLM3D | used by the fix tool to route between fixes; geometry may be inaccurate |
 | Terrain model | GeoTIFF (ALS DTM, e.g. 1 m Austria) | optional, for height profile and centerline refinement |
 | Camera calibration | YAML (intrinsics, distortion) | one-off checkerboard calibration |
 
