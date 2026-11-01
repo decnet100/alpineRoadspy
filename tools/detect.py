@@ -181,6 +181,20 @@ boxes.forEach((b) => b.onchange = () => {{
     (out_dir / "index.html").write_text(page, encoding="utf-8")
 
 
+def rebuild_index(out_dir, video, video_url):
+    """index.html from detections.csv and the overlay images of an earlier run."""
+    fps = cv2.VideoCapture(str(video)).get(cv2.CAP_PROP_FPS) or 30
+    frames = sorted(int(p.stem) for p in (out_dir / "overlays").glob("*.jpg"))
+    counts_by_frame = {f: {} for f in frames}
+    with open(out_dir / "detections.csv", newline="", encoding="utf-8") as fh:
+        for r in csv.DictReader(fh):
+            c = counts_by_frame.setdefault(int(r["frame"]), {})
+            c[r["class"]] = c.get(r["class"], 0) + 1
+    names = sorted({n for c in counts_by_frame.values() for n in c})
+    write_index(out_dir, video.name, video_url, [(f, f / fps) for f in frames], counts_by_frame, names)
+    print(f"Rebuilt {out_dir / 'index.html'} ({len(frames)} frames)")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("video")
@@ -193,11 +207,9 @@ def main():
     parser.add_argument("--trajectory", help="per-frame trajectory CSV exported from fix_picker.html")
     parser.add_argument("--out", type=Path, help="output folder (default data/detect/<video>)")
     parser.add_argument("--device", default=None, help="cuda or cpu (default: cuda if available)")
+    parser.add_argument("--index-only", action="store_true",
+                        help="only rebuild index.html from an existing run (detections.csv + overlays)")
     args = parser.parse_args()
-
-    import torch
-
-    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     video = Path(args.video)
     out_dir = args.out or ROOT / "data" / "detect" / video.stem
     if not args.out and (args.start or args.end):
@@ -210,6 +222,13 @@ def main():
     except ValueError:
         video_url = None  # outside the repo: not reachable through serve.py
 
+    if args.index_only:
+        rebuild_index(out_dir, video, video_url)
+        return
+
+    import torch
+
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading {MODEL} on {device} ...", flush=True)
     processor, model, dtype = load_model(device)
     labels = model.config.id2label
@@ -265,14 +284,14 @@ def main():
                               f"{elongation:.2f}", f"{tilt:.1f}"])
             top = int(seg.shape[0] * 0.3)
             px = lambda m: int(m.sum() * rail_norm)  # pixel counts relative to a 720-line image
-            counts = []
+            pixels = []   # guardrail/barrier per side, then tunnel and bridge (guardrails.csv)
             for cls in RAIL_CLASSES:
                 m = np.isin(seg, [i for i, n in class_ids.items() if n == cls])
-                counts += [px(m[:, : width // 2]), px(m[:, width // 2:]),
+                pixels += [px(m[:, : width // 2]), px(m[:, width // 2:]),
                            px(m[top:, : int(width * 0.3)]), px(m[top:, int(width * 0.7):])]
             # whole-image pixels of tunnel / bridge structure (tunnel sections in track.py)
-            counts += [px(np.isin(seg, [i for i, n in labels.items() if n == name])) for name in ("Tunnel", "Bridge")]
-            rail.writerow([frame, f"{t:.3f}", *counts, pos.get("station_m", ""), pos.get("lon", ""), pos.get("lat", "")])
+            pixels += [px(np.isin(seg, [i for i, n in labels.items() if n == name])) for name in ("Tunnel", "Bridge")]
+            rail.writerow([frame, f"{t:.3f}", *pixels, pos.get("station_m", ""), pos.get("lon", ""), pos.get("lat", "")])
             img = overlay(bgr, seg, class_ids, colours, found)
             cv2.imwrite(str(out_dir / "overlays" / f"{frame:06d}.jpg"), cv2.resize(img, (640, int(640 * img.shape[0] / width))),
                         [cv2.IMWRITE_JPEG_QUALITY, 80])

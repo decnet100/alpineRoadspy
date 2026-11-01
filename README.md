@@ -165,7 +165,8 @@ python tools/detect.py videos/long.mp4 --step 3 --end 41:30
 python tools/detect.py videos/long.mp4 --step 3 --start 41:30
 ```
 
-Times as seconds, `mm:ss` or `h:mm:ss`. Each part goes to its own folder
+Times as seconds, `mm:ss` or `h:mm:ss`. `--index-only` rebuilds the overview page
+of an existing run without detecting again. Each part goes to its own folder
 `data/detect/<video>/part_<start>-<end>/`; `track.py` combines all parts
 automatically (overlapping frames are counted once).
 
