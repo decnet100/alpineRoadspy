@@ -24,6 +24,32 @@ See [docs/concept.md](docs/concept.md) for the approach.
 
 Concept phase. Available so far: a browser tool for setting position fixes.
 
+## Preparing a video
+
+```bash
+python tools/prepare_video.py videos/samnaun.webm
+```
+
+Transcodes to H.264 with constant frame rate and no audio:
+`<name>_work.mp4` (1080 lines) for detection, tracking and the fix picker,
+and – if the source is larger – `<name>_full.mp4` at full resolution, from
+which `track.py` and `signs.py` cut their crops automatically. Both copies
+come from one ffmpeg run, so frame numbers match. H.264 rather than
+H.265/VP9/AV1: it decodes fastest and plays in every browser. Uses NVENC if
+available. Run all further steps on the `_work.mp4`.
+
+## Traffic signs
+
+`catalog/signs.csv` lists the signs of the Austrian StVO (§§ 50, 52–54) and
+the Swiss SSV (appendix 2) with OpenStreetMap-style codes (`AT:52.10a`,
+`CH:2.30`), official name, legal reference and a public-domain reference
+drawing; rebuild it with `tools/build_sign_catalog.py`.
+
+`tools/signs.py` cuts the best full-resolution views of every sign object and
+ranks catalog signs by image similarity; with `--vlm <model>` a local
+vision-language model also reads value, text lines and destinations.
+Work in progress: the catalog matching is not reliable yet.
+
 ## Setting position fixes
 
 `tools/fix_picker.html` shows the video next to a map. Pause at a

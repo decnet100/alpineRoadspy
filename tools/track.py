@@ -15,6 +15,7 @@ Reads data/detect/<video>/detections.csv and guardrails.csv, or those of all
 partial runs in data/detect/<video>/part_*/ (override with --detections /
 --guardrails, several files allowed) and writes to data/objects/<video>/:
     objects.csv       one row per object
+    tracks.json       all detections (frame, box) per object
     objects.geojson   objects (points) and guardrail sections (lines), WGS84;
                       load it in the fix picker as reference layer to review
     index.html        one thumbnail per object, click opens the fix picker there
@@ -32,6 +33,8 @@ from pathlib import Path
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+
+from videoio import full_resolution
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -217,11 +220,12 @@ def guardrail_sections(rows, traj, min_px, min_len, max_gap_m, lead_m):
     return sections, near
 
 
-def thumbnails(video, objects, out_dir):
+def thumbnails(video, objects, out_dir, scale=1.0):
     """One crop per object from its largest detection.
 
     Reads the video once from front to back: seeking for every object is very
-    slow, especially for long, 4K or VP9/WebM videos.
+    slow, especially for long, 4K or VP9/WebM videos. `scale` converts boxes to
+    the pixels of `video` (full-resolution copy).
     """
     import cv2
 
@@ -250,7 +254,7 @@ def thumbnails(video, objects, out_dir):
             break
         h, w = img.shape[:2]
         for o in wanted[target]:
-            d = o["best"]
+            d = {k: o["best"][k] * scale for k in ("x1", "y1", "x2", "y2")}
             bw, bh = d["x2"] - d["x1"], d["y2"] - d["y1"]
             pad = max(bw, bh, 40 * h / 720)
             x1, y1 = max(0, int(d["x1"] - pad)), max(0, int(d["y1"] - pad))
@@ -339,6 +343,7 @@ def main():
     parser.add_argument("--pole-min-height", type=float, default=0.06,
                         help="poles never taller than this share of the image height are uncertain (default 0.06)")
     parser.add_argument("--no-thumbs", action="store_true")
+    parser.add_argument("--full-res", help="video to cut thumbnails from (default: <name>_full.mp4 next to a <name>_work.mp4)")
     args = parser.parse_args()
 
     video = Path(args.video)
@@ -383,7 +388,7 @@ def main():
             largest = sorted(tr, key=lambda d: d["size"])[-3:]
             objects.append({"group": group, "class": Counter(d["class"] for d in tr).most_common(1)[0][0], "hits": len(tr),
                             "t_first": tr[0]["t"], "t_last": tr[-1]["t"], "t_pass": t_pass, "fitted": fitted,
-                            "side": side_of(tr, width), "best": largest[-1],
+                            "side": side_of(tr, width), "best": largest[-1], "track": tr,
                             "max_height": max(d["y2"] - d["y1"] + 1 for d in tr),
                             "elongation": float(np.median([d["elongation"] for d in largest]))})
 
@@ -396,6 +401,7 @@ def main():
             keep = prev if prev["hits"] >= o["hits"] else o
             keep["hits"] = prev["hits"] + o["hits"]
             keep["best"] = max(prev["best"], o["best"], key=lambda d: d["size"])
+            keep["track"] = sorted(prev["track"] + o["track"], key=lambda d: d["frame"])
             keep["max_height"] = max(prev["max_height"], o["max_height"])
             merged[-1] = keep
         else:
@@ -447,11 +453,17 @@ def main():
                          "properties": {"kind": "guardrail", "side": side, "station_from_m": round(start, 1),
                                         "station_to_m": round(end, 1)}})
     (out_dir / "objects.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": features}), encoding="utf-8")
+    # every detection of every object, e.g. for tools/signs.py to pick the best views
+    tracks = {o["id"]: [[d["frame"], round(d["x1"], 1), round(d["y1"], 1), round(d["x2"], 1), round(d["y2"], 1)]
+                        for d in o["track"]] for o in objects}
+    (out_dir / "tracks.json").write_text(json.dumps(tracks), encoding="utf-8")
 
     has_thumbs = not args.no_thumbs and video.exists()
     if has_thumbs:
-        print(f"Writing thumbnails for {len(objects)} objects (one pass through the video; --no-thumbs skips this) ...", flush=True)
-        thumbnails(video, objects, out_dir)
+        crop_video, scale = full_resolution(video, args.full_res)
+        print(f"Writing thumbnails for {len(objects)} objects from {crop_video.name} "
+              f"(one pass through the video; --no-thumbs skips this) ...", flush=True)
+        thumbnails(crop_video, objects, out_dir, scale)
     try:
         video_url = "/" + video.resolve().relative_to(ROOT).as_posix()
     except ValueError:
