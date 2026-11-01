@@ -175,6 +175,44 @@ def merge_split_regions(dets):
     return out
 
 
+def absorb_parts(tracks, step, window=1):
+    """Merge a track into a longer one when its boxes lie inside that track's boxes.
+
+    The segmentation flips between seeing a tall mast or a sign in pieces and as
+    a whole; the pieces formed short tracks of their own next to the track of
+    the whole object. A track is absorbed when at least half of its detections
+    lie mostly (>= 70 % of their area) inside a clearly larger box (>= 1.5x the
+    area) of the longer track in the same or a neighbouring evaluated frame –
+    a separate post or sign merely standing in front of a mast is not covered
+    that well in every frame.
+    """
+    def covered(d, h):
+        iw = max(0, min(d["x2"], h["x2"]) - max(d["x1"], h["x1"]))
+        ih = max(0, min(d["y2"], h["y2"]) - max(d["y1"], h["y1"]))
+        area_d = max(1, (d["x2"] - d["x1"]) * (d["y2"] - d["y1"]))
+        area_h = (h["x2"] - h["x1"]) * (h["y2"] - h["y1"])
+        return iw * ih >= 0.7 * area_d and area_h >= 1.5 * area_d
+
+    tracks = sorted(tracks, key=len, reverse=True)
+    absorbed = [False] * len(tracks)
+    for j in range(len(tracks) - 1, -1, -1):          # shortest first
+        part = tracks[j]
+        f0, f1 = part[0]["frame"] - window * step, part[-1]["frame"] + window * step
+        for i in range(j):
+            if absorbed[i] or len(tracks[i]) <= len(part):
+                continue
+            host = [d for d in tracks[i] if f0 <= d["frame"] <= f1]
+            if not host:
+                continue
+            inside = sum(any(abs(h["frame"] - d["frame"]) <= window * step and covered(d, h) for h in host) for d in part)
+            if inside >= 0.5 * len(part):
+                frames = {d["frame"] for d in tracks[i]}
+                tracks[i] = sorted(tracks[i] + [d for d in part if d["frame"] not in frames], key=lambda d: d["frame"])
+                absorbed[j] = True
+                break
+    return [t for t, a in zip(tracks, absorbed) if not a]
+
+
 def stitch(tracks, step, max_steps=5):
     """Join a track that broke off (blur, short occlusion) with the one continuing it.
 
@@ -618,8 +656,10 @@ def main():
     objects = []
     for group in sorted({d["group"] for d in dets}):
         raw = track([d for d in dets if d["group"] == group], step, args.max_gap)
-        tracks = stitch(raw, step)
-        print(f"  {group}: {len(raw)} tracks, {len(raw) - len(tracks)} broken ones joined", flush=True)
+        stitched = stitch(raw, step)
+        tracks = absorb_parts(stitched, step)
+        print(f"  {group}: {len(raw)} tracks, {len(raw) - len(stitched)} broken ones joined, "
+              f"{len(stitched) - len(tracks)} pieces absorbed by the whole object", flush=True)
         for tr in tracks:
             if len(tr) < args.min_hits:
                 continue
