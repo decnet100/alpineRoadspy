@@ -14,7 +14,8 @@ combines them.
 
 Writes to data/detect/<video>/:
     detections.csv   one row per region and frame (+ station/position from the trajectory)
-    guardrails.csv   guardrail and barrier pixels left/right (whole side / near field) per frame
+    guardrails.csv   guardrail and barrier pixels left/right (whole side / near field), tunnel and
+                     bridge pixels per frame
     overlays/        frames with the classes coloured in
     index.html       contact sheet; click a frame to open it in the fix picker
 
@@ -240,7 +241,7 @@ def main():
     # left_/right_ = guardrail, barrier_* = barrier
     rail.writerow(["frame", "video_time_s", "left_px", "right_px", "left_near_px", "right_near_px",
                    "barrier_left_px", "barrier_right_px", "barrier_left_near_px", "barrier_right_near_px",
-                   "station_m", "lon", "lat"])
+                   "tunnel_px", "bridge_px", "station_m", "lon", "lat"])
 
     frames, counts_by_frame, batch = [], {}, []
     started = time.time()
@@ -269,6 +270,8 @@ def main():
                 m = np.isin(seg, [i for i, n in class_ids.items() if n == cls])
                 counts += [px(m[:, : width // 2]), px(m[:, width // 2:]),
                            px(m[top:, : int(width * 0.3)]), px(m[top:, int(width * 0.7):])]
+            # whole-image pixels of tunnel / bridge structure (tunnel sections in track.py)
+            counts += [px(np.isin(seg, [i for i, n in labels.items() if n == name])) for name in ("Tunnel", "Bridge")]
             rail.writerow([frame, f"{t:.3f}", *counts, pos.get("station_m", ""), pos.get("lon", ""), pos.get("lat", "")])
             img = overlay(bgr, seg, class_ids, colours, found)
             cv2.imwrite(str(out_dir / "overlays" / f"{frame:06d}.jpg"), cv2.resize(img, (640, int(640 * img.shape[0] / width))),

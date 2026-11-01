@@ -258,8 +258,32 @@ def restraint_sections(rows, traj, args, join_m=30):
     return sorted(out), near, bool(barriers) or "barrier_left_px" in rows[0]
 
 
-def thumbnails(video, objects, out_dir, scale=1.0):
-    """One crop per object from its largest detection.
+def tunnel_sections(rows, traj, min_px, min_len=20, max_gap_m=20):
+    """Sections where much of the image is tunnel structure (detect.py tunnel_px)."""
+    pts = sorted((traj.at(float(r["video_time_s"]))["station"], float(r["tunnel_px"]) >= min_px)
+                 for r in rows if traj.covers(float(r["video_time_s"])))
+    if not pts:
+        return []
+    stations = [p[0] for p in pts]
+    flags = np.array([p[1] for p in pts], dtype=float)
+    if len(flags) >= 5:
+        flags = np.array([np.median(flags[max(0, i - 2): i + 3]) for i in range(len(flags))])
+    out, first, last = [], None, None
+    for i, st in enumerate(stations):
+        if flags[i] >= 0.5:
+            if first is not None and st - stations[last] > max_gap_m:
+                out.append((stations[first], stations[last]))
+                first = None
+            first = i if first is None else first
+            last = i
+    if first is not None:
+        out.append((stations[first], stations[last]))
+    return [(s, e, "both", "tunnel") for s, e in out if e - s >= min_len]
+
+
+def thumbnails(video, objects, out_dir, scale=1.0, frames=None):
+    """One crop per object from its largest detection, plus whole frames
+    `frames` ({frame: [file name]}, e.g. sample views of tunnel sections).
 
     Reads the video once from front to back: seeking for every object is very
     slow, especially for long, 4K or VP9/WebM videos. `scale` converts boxes to
@@ -268,10 +292,10 @@ def thumbnails(video, objects, out_dir, scale=1.0):
     import cv2
 
     (out_dir / "thumbs").mkdir(exist_ok=True)
-    wanted = {}
+    wanted, whole = {}, frames or {}
     for o in objects:
         wanted.setdefault(o["best"]["frame"], []).append(o)
-    targets = sorted(wanted)
+    targets = sorted(set(wanted) | set(whole))
     if not targets:
         return
     cap = cv2.VideoCapture(str(video))
@@ -291,7 +315,11 @@ def thumbnails(video, objects, out_dir, scale=1.0):
         if not ok:
             break
         h, w = img.shape[:2]
-        for o in wanted[target]:
+        for name in whole.get(target, []):
+            fit = 640 / w
+            cv2.imwrite(str(out_dir / "thumbs" / name), cv2.resize(img, (640, int(h * fit)), interpolation=cv2.INTER_AREA),
+                        [cv2.IMWRITE_JPEG_QUALITY, 82])
+        for o in wanted.get(target, []):
             d = {k: o["best"][k] * scale for k in ("x1", "y1", "x2", "y2")}
             bw, bh = d["x2"] - d["x1"], d["y2"] - d["y1"]
             pad = max(bw, bh, 40 * h / 720)
@@ -300,14 +328,22 @@ def thumbnails(video, objects, out_dir, scale=1.0):
             crop = img[y1:y2, x1:x2].copy()
             cv2.rectangle(crop, (int(d["x1"] - x1), int(d["y1"] - y1)), (int(d["x2"] - x1), int(d["y2"] - y1)),
                           (255, 0, 255), max(1, h // 720))
-            scale = 160 / crop.shape[0]
-            crop = cv2.resize(crop, (max(1, int(crop.shape[1] * scale)), 160), interpolation=cv2.INTER_AREA)
+            fit = 160 / crop.shape[0]   # (not `scale`: that converts the boxes of every object)
+            crop = cv2.resize(crop, (max(1, int(crop.shape[1] * fit)), 160), interpolation=cv2.INTER_AREA)
             cv2.imwrite(str(out_dir / "thumbs" / f"{o['id']}.jpg"), crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
         if n % report == 0:
             print(f"  thumbnails: {n}/{len(targets)} frames, {time.time() - started:.0f} s", flush=True)
 
 
 REASON_TEXT = {"not_slender": "nicht schlank", "never_near": "nie nah passiert"}
+
+
+def video_fps(video):
+    try:
+        import cv2
+        return cv2.VideoCapture(str(video)).get(cv2.CAP_PROP_FPS) or 30.0
+    except Exception:
+        return 30.0
 
 
 def image_height(video):
@@ -382,6 +418,8 @@ def main():
                         help="poles less elongated than this (major/minor axis) are uncertain (default 3)")
     parser.add_argument("--pole-min-height", type=float, default=0.06,
                         help="poles never taller than this share of the image height are uncertain (default 0.06)")
+    parser.add_argument("--tunnel-px", type=int, default=100000,
+                        help="tunnel pixels (720-line image) for a frame to count as inside a tunnel (default 100000, ~11 %%)")
     parser.add_argument("--no-thumbs", action="store_true")
     parser.add_argument("--full-res", help="video to cut thumbnails from (default: <name>_full.mp4 next to a <name>_work.mp4)")
     args = parser.parse_args()
@@ -466,11 +504,31 @@ def main():
         o["lon"], o["lat"], o["axis_dist"] = place(p, o["side"], EDGE_M[o["group"]], args.road_width)
 
     sections, near, separate = restraint_sections(rail_rows, traj, args) if rail_rows else ([], False, False)
+    has_tunnels = bool(rail_rows) and "tunnel_px" in rail_rows[0]
+    if has_tunnels:
+        sections += tunnel_sections(rail_rows, traj, args.tunnel_px)
+    # ids, video times and sample frames (for the review page) per section
+    fps = video_fps(video)
+    valid = ~np.isnan(traj.station)
+    to_time = lambda st: float(np.interp(st, traj.station[valid], traj.t[valid]))
+    section_info, counters, sample_frames = [], {}, {}
+    for s, e, side, kind in sorted(sections, key=lambda x: (x[0], x[3])):
+        prefix = {"guardrail": "G", "barrier": "B", "tunnel": "T"}[kind]
+        counters[prefix] = counters.get(prefix, 0) + 1
+        sid = f"{prefix}{counters[prefix]:03d}"
+        t0, t1 = to_time(s), to_time(e)
+        thumbs = []
+        for k, q in enumerate((0.1, 0.4, 0.7, 0.95)):
+            name = f"{sid}_{k}.jpg"
+            sample_frames.setdefault(int(round((t0 + q * (t1 - t0)) * fps)), []).append(name)
+            thumbs.append(name)
+        section_info.append({"id": sid, "kind": kind, "side": side, "from": s, "to": e, "t0": t0, "t1": t1, "thumbs": thumbs})
     with open(out_dir / "sections.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["kind", "side", "station_from_m", "station_to_m", "length_m"])
-        for s, e, side, kind in sections:
-            w.writerow([kind, side, f"{s:.1f}", f"{e:.1f}", f"{e - s:.1f}"])
+        w.writerow(["id", "kind", "side", "station_from_m", "station_to_m", "length_m", "time_from_s", "time_to_s"])
+        for x in section_info:
+            w.writerow([x["id"], x["kind"], x["side"], f"{x['from']:.1f}", f"{x['to']:.1f}", f"{x['to'] - x['from']:.1f}",
+                        f"{x['t0']:.2f}", f"{x['t1']:.2f}"])
 
     with open(out_dir / "objects.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -486,15 +544,20 @@ def main():
                                 "side": o["side"], "video_time_s": round(o["t_pass"], 2), "hits": o["hits"],
                                 "status": o["status"], "reasons": " ".join(o["reasons"])}}
                 for o in objects]
-    for start, end, side, kind in sections:
+    for x in section_info:
+        start, end, side, kind = x["from"], x["to"], x["side"], x["kind"]
         sts = np.linspace(start, end, max(2, int((end - start) / 5) + 1))
         idx = np.interp(sts, traj.station[~np.isnan(traj.station)], np.flatnonzero(~np.isnan(traj.station)))
         coords = []
         for k in idx:
             p = traj.at(traj.t[int(round(k))])
-            coords.append([round(c, 7) for c in place(p, side, EDGE_M["guardrail"], args.road_width)[:2]])
+            if side == "both":   # tunnel: on the camera track
+                coords.append([round(p["lon"], 7), round(p["lat"], 7)])
+            else:
+                coords.append([round(c, 7) for c in place(p, side, EDGE_M["guardrail"], args.road_width)[:2]])
         features.append({"type": "Feature", "geometry": {"type": "LineString", "coordinates": coords},
-                         "properties": {"kind": kind, "side": side, "station_from_m": round(start, 1),
+                         "properties": {"id": x["id"], "kind": kind, "side": side, "video_time_s": round(x["t0"], 2),
+                                        "time_to_s": round(x["t1"], 2), "thumbs": x["thumbs"], "station_from_m": round(start, 1),
                                         "station_to_m": round(end, 1)}})
     (out_dir / "objects.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": features}), encoding="utf-8")
     # every detection of every object, e.g. for tools/signs.py to pick the best views
@@ -507,7 +570,7 @@ def main():
         crop_video, scale = full_resolution(video, args.full_res)
         print(f"Writing thumbnails for {len(objects)} objects from {crop_video.name} "
               f"(one pass through the video; --no-thumbs skips this) ...", flush=True)
-        thumbnails(crop_video, objects, out_dir, scale)
+        thumbnails(crop_video, objects, out_dir, scale, sample_frames)
     try:
         video_url = "/" + video.resolve().relative_to(ROOT).as_posix()
     except ValueError:
@@ -530,6 +593,8 @@ def main():
         print(f"  guardrails: {fmt('guardrail')}")
         print(f"  barriers:   {fmt('barrier')}" if separate else
               "  barriers:   not separated in this file (older detect.py) – rerun detect.py to tell walls from guardrails")
+        print(f"  tunnels:    {fmt('tunnel').replace(' both', '')}" if has_tunnels else
+              "  tunnels:    no tunnel values in this file (older detect.py)")
     if not traj.has_offset:
         print("Note: trajectory has no offset_m column (export it again from the fix picker); "
               "camera assumed in the middle of the right lane")

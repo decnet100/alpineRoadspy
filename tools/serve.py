@@ -7,7 +7,8 @@ which browsers need for seeking in videos. It binds to localhost only.
 
 then open the printed URL. With ``--roads`` (default: the file written by
 tools/prepare_gip.py, if present) it also answers ``/api/roads?bbox=...``
-with the road links in that box, used by fix_picker.html to follow roads.
+with the road links in that box, used by fix_picker.html to follow roads, and
+accepts POST /api/save?path=data/....json from the review page.
 """
 
 import argparse
@@ -102,6 +103,31 @@ class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
         if url.path == "/api/roads":
             return self.send_roads(parse_qs(url.query))
         return super().do_GET()
+
+    def do_POST(self):
+        """/api/save?path=data/...json – review results from the browser tools."""
+        url = urlparse(self.path)
+        if url.path != "/api/save":
+            return self.send_json({"error": "not found"}, 404)
+        # a custom header forces a CORS preflight, so other web pages cannot write here
+        if self.headers.get("X-Alpineroadspy") != "1":
+            return self.send_json({"error": "missing header"}, 403)
+        target = (ROOT / parse_qs(url.query).get("path", [""])[0].lstrip("/")).resolve()
+        if (ROOT / "data").resolve() not in target.parents or target.suffix != ".json":
+            return self.send_json({"error": "only .json files below data/"}, 403)
+        length = int(self.headers.get("Content-Length", 0))
+        if length > 50_000_000:
+            return self.send_json({"error": "too large"}, 413)
+        body = self.rfile.read(length)
+        try:
+            json.loads(body)
+        except ValueError:
+            return self.send_json({"error": "not JSON"}, 400)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_bytes(body)
+        tmp.replace(target)   # never leave a half-written file
+        return self.send_json({"saved": target.relative_to(ROOT).as_posix()})
 
     def send_roads(self, query):
         if self.roads is None:

@@ -38,6 +38,25 @@ come from one ffmpeg run, so frame numbers match. H.264 rather than
 H.265/VP9/AV1: it decodes fastest and plays in every browser. Uses NVENC if
 available. Run all further steps on the `_work.mp4`.
 
+## Reviewing results
+
+```bash
+python tools/serve.py
+```
+
+Open `http://localhost:8000/tools/review.html?video=/videos/samnaun_work.mp4`
+and click through everything found for that video: tunnels (lining: concrete,
+rock, shotcrete, mixed), guardrail and barrier sections, poles, lights and
+signs (code from the catalog suggestions, value, text exactly as printed,
+names per language, destinations). The video jumps to each item; sample
+frames or crops are shown next to it. Keyboard: digits choose, Enter confirms
+and moves on, arrow keys navigate, space plays. Decisions are saved
+automatically to `data/review/<video>.json`.
+
+Tunnel sections come from the segmentation (class "Tunnel", detect.py column
+`tunnel_px`) and are listed by track.py together with guardrails/barriers in
+`sections.csv`, with four sample frames each.
+
 ## Traffic signs
 
 `catalog/signs.csv` lists the signs of the Austrian StVO (§§ 50, 52–54) and
