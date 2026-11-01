@@ -125,6 +125,103 @@ def place(p, side, edge_m, road_width):
     return lon, lat, from_axis
 
 
+def same_object(a, b, group):
+    """Whether two regions of one frame are parts of one object (see merge_split_regions)."""
+    ix = min(a["x2"], b["x2"]) - max(a["x1"], b["x1"])
+    iy = min(a["y2"], b["y2"]) - max(a["y1"], b["y1"])
+    if group == "pole":
+        narrower = min(a["x2"] - a["x1"], b["x2"] - b["x1"]) + 1
+        return ix >= 0.5 * narrower and -iy <= 0.25 * max(a["size"], b["size"])
+    smaller = min((a["x2"] - a["x1"]) * (a["y2"] - a["y1"]), (b["x2"] - b["x1"]) * (b["y2"] - b["y1"]))
+    return ix > 0 and iy > 0 and ix * iy >= 0.6 * max(smaller, 1)
+
+
+def merge_split_regions(dets):
+    """Join regions of one group in the same frame that belong to one object.
+
+    The segmentation sometimes splits an object (sign with a sticker or glare, a
+    post behind a twig) into several regions, which then became separate objects.
+    Neighbouring objects must stay apart, so the rules are narrow:
+      - poles: parts one above the other (horizontal overlap of at least half
+        the narrower part, small vertical gap) – posts side by side stay apart;
+      - signs: one part lies mostly (>= 60 %) inside the other – signs that
+        overlap in perspective, stacked signs and additional panels stay apart.
+    """
+    by_key = {}
+    for d in dets:
+        by_key.setdefault((d["frame"], d["group"]), []).append(d)
+    out = []
+    for (frame, group), boxes in by_key.items():
+        boxes = sorted(boxes, key=lambda d: -d["size"])
+        merged = True
+        while merged and len(boxes) > 1:
+            merged = False
+            for i in range(len(boxes)):
+                for j in range(i + 1, len(boxes)):
+                    a, b = boxes[i], boxes[j]
+                    if not same_object(a, b, group):
+                        continue
+                    if True:
+                        x1, y1 = min(a["x1"], b["x1"]), min(a["y1"], b["y1"])
+                        x2, y2 = max(a["x2"], b["x2"]), max(a["y2"], b["y2"])
+                        boxes[i] = dict(a, x1=x1, y1=y1, x2=x2, y2=y2, cx=(x1 + x2) / 2, cy=(y1 + y2) / 2,
+                                        size=math.hypot(x2 - x1 + 1, y2 - y1 + 1))   # class/shape of the larger part
+                        del boxes[j]
+                        merged = True
+                        break
+                if merged:
+                    break
+        out += boxes
+    return out
+
+
+def stitch(tracks, step, max_steps=5):
+    """Join a track that broke off (blur, short occlusion) with the one continuing it.
+
+    Strict on purpose – successive delineator posts look alike: the continuation
+    must start within `max_steps` evaluated frames, close to the position
+    extrapolated from the last motion, keep moving in the same direction and be
+    about as large (0.8-2.5x) as the broken track at its end. Each track is
+    joined at most once per side, no chains of guesses.
+    """
+    tracks = sorted(tracks, key=lambda t: t[0]["frame"])
+    links = []
+    for i, a in enumerate(tracks):
+        if len(a) < 2:
+            continue
+        end, prev = a[-1], a[-min(len(a), 4)]
+        span = max(1, (end["frame"] - prev["frame"]) / step)
+        vx, vy = (end["cx"] - prev["cx"]) / span, (end["cy"] - prev["cy"]) / span
+        for j, b in enumerate(tracks):
+            start = b[0]
+            gap = (start["frame"] - end["frame"]) / step
+            if j == i or not 0 < gap <= max_steps or not 0.8 * end["size"] <= start["size"] <= 2.5 * end["size"]:
+                continue
+            dx, dy = start["cx"] - end["cx"], start["cy"] - end["cy"]
+            if len(b) >= 2:   # the continuation must move on in the same direction
+                bx, by = b[1]["cx"] - start["cx"], b[1]["cy"] - start["cy"]
+                if bx * vx + by * vy < 0:
+                    continue
+            dist = math.hypot(dx - vx * gap, dy - vy * gap)
+            if dist <= end["size"] + 5 * gap:
+                links.append((dist, i, j))
+    head, tail = set(), set()
+    nxt = {}
+    for dist, i, j in sorted(links):
+        if i not in head and j not in tail:
+            head.add(i); tail.add(j); nxt[i] = j
+    out = []
+    for i, t in enumerate(tracks):
+        if i in tail:
+            continue
+        chain, k = list(t), i
+        while k in nxt:
+            k = nxt[k]
+            chain += tracks[k]
+        out.append(chain)
+    return out
+
+
 def track(dets, step, max_gap):
     """Greedy-optimal frame-to-frame association within one group. Returns lists of detections."""
     by_frame = {}
@@ -279,6 +376,65 @@ def tunnel_sections(rows, traj, min_px, min_len=20, max_gap_m=20):
     if first is not None:
         out.append((stations[first], stations[last]))
     return [(s, e, "both", "tunnel") for s, e in out if e - s >= min_len]
+
+
+def previous_run(out_dir):
+    """tracks.json and sections.csv of the previous run, read before they are replaced."""
+    tracks = json.loads((out_dir / "tracks.json").read_text(encoding="utf-8")) if (out_dir / "tracks.json").exists() else {}
+    sections = {r["id"]: r for r in read_csv(out_dir / "sections.csv") if "id" in r} if (out_dir / "sections.csv").exists() else {}
+    return tracks, sections
+
+
+def carry_over_review(review_path, old, objects, section_info):
+    """Keep review decisions when object ids change (new tracking, new detection run).
+
+    Old ids are matched to new ones by shared detections (same frame, overlapping
+    box) for objects and by kind, side and overlapping stations for sections.
+    The previous file is kept as *.bak; decisions without a match go to
+    "unmatched" instead of being dropped.
+    """
+    old_tracks, old_sections = old
+    if not review_path.exists() or not (old_tracks or old_sections):
+        return None
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    by_frame = {}
+    for o in objects:
+        for d in o["track"]:
+            by_frame.setdefault(d["frame"], []).append((o["id"], d))
+    items, unmatched, moved, lost = {}, dict(review.get("unmatched", {})), 0, 0
+    for old_id, entry in review.get("items", {}).items():
+        new_id = None
+        if old_id in old_tracks:
+            # strict: same kind of object, clearly overlapping boxes, and at least half of the
+            # old detections at the new object – rather unmatched than attached to a neighbour
+            votes = {}
+            for f, x1, y1, x2, y2 in old_tracks[old_id]:
+                for oid, d in by_frame.get(f, []):
+                    if oid[0] != old_id[0]:
+                        continue
+                    iw = max(0, min(x2, d["x2"]) - max(x1, d["x1"]))
+                    ih = max(0, min(y2, d["y2"]) - max(y1, d["y1"]))
+                    union = (x2 - x1) * (y2 - y1) + (d["x2"] - d["x1"]) * (d["y2"] - d["y1"]) - iw * ih
+                    if union > 0 and iw * ih / union >= 0.3:
+                        votes[oid] = votes.get(oid, 0) + 1
+            best = max(votes, key=votes.get) if votes else None
+            new_id = best if best and votes[best] >= 0.5 * len(old_tracks[old_id]) else None
+        elif old_id in old_sections:
+            o = old_sections[old_id]
+            s0, s1 = float(o["station_from_m"]), float(o["station_to_m"])
+            best = max((min(s1, x["to"]) - max(s0, x["from"]), x["id"]) for x in section_info
+                       if x["kind"] == o["kind"] and x["side"] == o["side"]) if section_info else (0, None)
+            new_id = best[1] if best[0] > 0 else None
+        if new_id and new_id not in items:
+            items[new_id] = dict(entry, previous_id=entry.get("previous_id", old_id)) if new_id != old_id else entry
+            moved += new_id != old_id
+        else:
+            unmatched[old_id] = entry
+            lost += 1
+    review_path.with_name(review_path.name + ".bak").write_text(review_path.read_text(encoding="utf-8"), encoding="utf-8")
+    review["items"], review["unmatched"] = items, unmatched
+    review_path.write_text(json.dumps(review, ensure_ascii=False, indent=1), encoding="utf-8")
+    return len(items), moved, lost
 
 
 def thumbnails(video, objects, out_dir, scale=1.0, frames=None):
@@ -436,6 +592,7 @@ def main():
     out_dir = args.out or ROOT / "data" / "objects" / video.stem
     out_dir.mkdir(parents=True, exist_ok=True)
     traj = Trajectory(args.trajectory)
+    old_run = previous_run(out_dir)   # for carrying review decisions over to new ids
 
     dets = []
     for r in det_rows:
@@ -448,6 +605,9 @@ def main():
                      # rotation-invariant elongation from detect.py; older files: bounding box aspect
                      "elongation": float(r["elongation"]) if r.get("elongation") else
                                    max(x2 - x1 + 1, y2 - y1 + 1) / min(x2 - x1 + 1, y2 - y1 + 1)})
+    before = len(dets)
+    dets = merge_split_regions(dets)
+    print(f"{before} detections, {before - len(dets)} joined with another region of the same object", flush=True)
     frames = sorted({d["frame"] for d in dets})
     step = int(np.median(np.diff(frames))) if len(frames) > 1 else 1
     width = max(d["x2"] for d in dets) + 1
@@ -457,7 +617,10 @@ def main():
 
     objects = []
     for group in sorted({d["group"] for d in dets}):
-        for tr in track([d for d in dets if d["group"] == group], step, args.max_gap):
+        raw = track([d for d in dets if d["group"] == group], step, args.max_gap)
+        tracks = stitch(raw, step)
+        print(f"  {group}: {len(raw)} tracks, {len(raw) - len(tracks)} broken ones joined", flush=True)
+        for tr in tracks:
             if len(tr) < args.min_hits:
                 continue
             t_pass, fitted = pass_time(tr)
@@ -563,6 +726,8 @@ def main():
     # every detection of every object, e.g. for tools/signs.py to pick the best views
     tracks = {o["id"]: [[d["frame"], round(d["x1"], 1), round(d["y1"], 1), round(d["x2"], 1), round(d["y2"], 1)]
                         for d in o["track"]] for o in objects}
+    review_path = ROOT / "data" / "review" / f"{video.stem}.json"
+    carried = carry_over_review(review_path, old_run, objects, section_info)
     (out_dir / "tracks.json").write_text(json.dumps(tracks), encoding="utf-8")
 
     has_thumbs = not args.no_thumbs and video.exists()
@@ -595,6 +760,9 @@ def main():
               "  barriers:   not separated in this file (older detect.py) – rerun detect.py to tell walls from guardrails")
         print(f"  tunnels:    {fmt('tunnel').replace(' both', '')}" if has_tunnels else
               "  tunnels:    no tunnel values in this file (older detect.py)")
+    if carried:
+        print(f"Review decisions carried over: {carried[0]} kept ({carried[1]} with a new id), {carried[2]} without "
+              f"a matching object, kept under 'unmatched' in {review_path.name} (backup: {review_path.name}.bak)")
     if not traj.has_offset:
         print("Note: trajectory has no offset_m column (export it again from the fix picker); "
               "camera assumed in the middle of the right lane")
