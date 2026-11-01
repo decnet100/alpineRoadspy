@@ -164,7 +164,11 @@ places each one at the moment the camera passes it (apparent size grows
 inversely with distance: the zero of a line through 1/size over time). Station
 and coordinates come from the trajectory, the side from the direction in which
 the object leaves the image; guardrails become sections (station from–to,
-side).
+side). Guardrails and barriers (walls, concrete barriers, rock faces) are kept
+apart: a barrier stretch counts as guardrail only if it mostly overlaps a
+guardrail section or fills a gap of up to 30 m between two (the model
+sometimes calls guardrails in curves "Barrier"). Sections are written to
+`sections.csv`; barriers are brown on the map.
 
 ```bash
 python tools/track.py videos/brenner.mp4 --trajectory data/brenner_trajectory.csv

@@ -16,7 +16,8 @@ partial runs in data/detect/<video>/part_*/ (override with --detections /
 --guardrails, several files allowed) and writes to data/objects/<video>/:
     objects.csv       one row per object
     tracks.json       all detections (frame, box) per object
-    objects.geojson   objects (points) and guardrail sections (lines), WGS84;
+    sections.csv      guardrail and barrier sections (station from/to, side)
+    objects.geojson   objects (points), guardrail and barrier sections (lines), WGS84;
                       load it in the fix picker as reference layer to review
     index.html        one thumbnail per object, click opens the fix picker there
 """
@@ -181,8 +182,8 @@ def side_of(tr, width):
     return "right" if tr[-1]["cx"] > width / 2 else "left"
 
 
-def guardrail_sections(rows, traj, min_px, min_len, max_gap_m, lead_m):
-    """Sections (station from/to, side) with a guardrail.
+def guardrail_sections(rows, traj, min_px, min_len, max_gap_m, lead_m, prefix=""):
+    """Sections (station from/to, side) with a guardrail (prefix "barrier_": with a barrier).
 
     A section lasts as long as a guardrail is seen anywhere on that image side;
     the near part next to the vehicle is often hidden behind the cockpit. It
@@ -190,12 +191,12 @@ def guardrail_sections(rows, traj, min_px, min_len, max_gap_m, lead_m):
     *_near_px), because further ahead it is visible long before it is reached;
     without near-field values the start is shifted by `lead_m` instead.
     """
-    near = "left_near_px" in rows[0]
+    near = f"{prefix}left_near_px" in rows[0]
     smooth = lambda f: np.array([np.median(f[max(0, i - 2): i + 3]) for i in range(len(f))]) if len(f) >= 5 else f
     sections = []
     for side in ("left", "right"):
-        pts = sorted((traj.at(float(r["video_time_s"]))["station"], float(r[f"{side}_px"]) >= min_px,
-                      near and float(r[f"{side}_near_px"]) >= min_px / 3)
+        pts = sorted((traj.at(float(r["video_time_s"]))["station"], float(r[f"{prefix}{side}_px"]) >= min_px,
+                      near and float(r[f"{prefix}{side}_near_px"]) >= min_px / 3)
                      for r in rows if traj.covers(float(r["video_time_s"])))
         if not pts:
             continue
@@ -218,6 +219,43 @@ def guardrail_sections(rows, traj, min_px, min_len, max_gap_m, lead_m):
             if stations[b] - begin >= min_len:
                 sections.append((begin, stations[b], side))
     return sections, near
+
+
+def restraint_sections(rows, traj, args, join_m=30):
+    """Guardrail and barrier sections: [(from, to, side, kind)], kind "guardrail" or "barrier".
+
+    The model sometimes calls guardrails in curves or shade "Barrier". A barrier
+    section therefore counts as guardrail if it mostly overlaps a guardrail section
+    or fills a gap of at most `join_m` between two; otherwise (walls, concrete
+    barriers, rock faces) it stays a barrier. Older guardrails.csv files without
+    barrier columns contain both classes in the guardrail columns.
+    """
+    opts = dict(min_px=args.rail_px, min_len=20, max_gap_m=15, lead_m=args.rail_lead)
+    rails, near = guardrail_sections(rows, traj, **opts)
+    barriers = guardrail_sections(rows, traj, prefix="barrier_", **opts)[0] if "barrier_left_px" in rows[0] else []
+    out = []
+    for side in ("left", "right"):
+        g = sorted([s, e] for s, e, sd in rails if sd == side)
+        rest = []
+        for s, e, sd in barriers:
+            if sd != side:
+                continue
+            overlap = sum(max(0, min(e, ge) - max(s, gs)) for gs, ge in g)
+            before = [ge for gs, ge in g if gs < s]   # guardrail starting before the barrier (may overlap it)
+            after = [gs for gs, ge in g if ge > e]    # guardrail ending after it
+            fills_gap = before and after and s - max(before) <= join_m and min(after) - e <= join_m
+            if overlap >= 0.5 * (e - s) or fills_gap:
+                g.append([s, e])
+            else:
+                rest.append((s, e))
+        merged = []   # guardrail parts that now touch become one section
+        for s, e in sorted(g):
+            if merged and s - merged[-1][1] <= join_m:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        out += [(s, e, side, "guardrail") for s, e in merged] + [(s, e, side, "barrier") for s, e in rest]
+    return sorted(out), near, bool(barriers) or "barrier_left_px" in rows[0]
 
 
 def thumbnails(video, objects, out_dir, scale=1.0):
@@ -291,7 +329,8 @@ def write_index(out_dir, video_url, objects, sections, has_thumbs):
         return (f'<a class="cell g-{o["group"]} s-{o["status"]}" href="{link}" target="_blank">{img}<div><b>{o["id"]}</b> {o["class"]}<br>'
                 f'Station {o["station"]:.0f} m · {o["side"]} · {o["hits"]}× · {o["t_pass"]:.1f} s{why}</div></a>')
 
-    rails = "".join(f"<li>{s:.0f}–{e:.0f} m {side}</li>" for s, e, side in sections)
+    rails = "".join(f"<li>{s:.0f}–{e:.0f} m {side}</li>" for s, e, side, kind in sections if kind == "guardrail")
+    walls = "".join(f"<li>{s:.0f}–{e:.0f} m {side}</li>" for s, e, side, kind in sections if kind == "barrier")
     page = f"""<!doctype html><html lang="de"><head><meta charset="utf-8"><title>Objekte</title>
 <style>
 body {{ font: 13px system-ui, sans-serif; margin: 10px; }}
@@ -311,6 +350,7 @@ body {{ font: 13px system-ui, sans-serif; margin: 10px; }}
 · Klick öffnet die Stelle 1,5 s vor dem Passieren im Fixpunkt-Tool.</p>
 <div class="grid">{''.join(cell(o) for o in objects)}</div>
 <h4>Leitschienen</h4><ul>{rails or '<li>keine</li>'}</ul>
+<h4>Barrieren / Wände (Barrier)</h4><ul>{walls or '<li>keine</li>'}</ul>
 <script>
 const boxes = [...document.querySelectorAll('input')];
 boxes.forEach((b) => b.onchange = () => {{
@@ -425,8 +465,12 @@ def main():
         o["station"] = p["station"]
         o["lon"], o["lat"], o["axis_dist"] = place(p, o["side"], EDGE_M[o["group"]], args.road_width)
 
-    sections, near = guardrail_sections(rail_rows, traj, args.rail_px, min_len=20, max_gap_m=15,
-                                        lead_m=args.rail_lead) if rail_rows else ([], False)
+    sections, near, separate = restraint_sections(rail_rows, traj, args) if rail_rows else ([], False, False)
+    with open(out_dir / "sections.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["kind", "side", "station_from_m", "station_to_m", "length_m"])
+        for s, e, side, kind in sections:
+            w.writerow([kind, side, f"{s:.1f}", f"{e:.1f}", f"{e - s:.1f}"])
 
     with open(out_dir / "objects.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -442,7 +486,7 @@ def main():
                                 "side": o["side"], "video_time_s": round(o["t_pass"], 2), "hits": o["hits"],
                                 "status": o["status"], "reasons": " ".join(o["reasons"])}}
                 for o in objects]
-    for start, end, side in sections:
+    for start, end, side, kind in sections:
         sts = np.linspace(start, end, max(2, int((end - start) / 5) + 1))
         idx = np.interp(sts, traj.station[~np.isnan(traj.station)], np.flatnonzero(~np.isnan(traj.station)))
         coords = []
@@ -450,7 +494,7 @@ def main():
             p = traj.at(traj.t[int(round(k))])
             coords.append([round(c, 7) for c in place(p, side, EDGE_M["guardrail"], args.road_width)[:2]])
         features.append({"type": "Feature", "geometry": {"type": "LineString", "coordinates": coords},
-                         "properties": {"kind": "guardrail", "side": side, "station_from_m": round(start, 1),
+                         "properties": {"kind": kind, "side": side, "station_from_m": round(start, 1),
                                         "station_to_m": round(end, 1)}})
     (out_dir / "objects.geojson").write_text(json.dumps({"type": "FeatureCollection", "features": features}), encoding="utf-8")
     # every detection of every object, e.g. for tools/signs.py to pick the best views
@@ -481,8 +525,11 @@ def main():
     if not rail_rows:
         print(f"No guardrails: {rail_path} not found")
     else:
-        print(f"Guardrail sections from {rail_path} ({'start from near field' if near else 'whole image half – rerun detect.py for near-field values'}): "
-              + (", ".join(f"{s:.0f}-{e:.0f} m {side}" for s, e, side in sections) or "none"))
+        fmt = lambda k: ", ".join(f"{s:.0f}-{e:.0f} m {side}" for s, e, side, kind in sections if kind == k) or "none"
+        print(f"Sections from {rail_path} ({'start from near field' if near else 'whole image half – rerun detect.py for near-field values'}):")
+        print(f"  guardrails: {fmt('guardrail')}")
+        print(f"  barriers:   {fmt('barrier')}" if separate else
+              "  barriers:   not separated in this file (older detect.py) – rerun detect.py to tell walls from guardrails")
     if not traj.has_offset:
         print("Note: trajectory has no offset_m column (export it again from the fix picker); "
               "camera assumed in the middle of the right lane")

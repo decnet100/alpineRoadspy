@@ -3,8 +3,8 @@
 Runs a semantic segmentation model trained on Mapillary Vistas (Mask2Former,
 Swin-L) on every n-th frame and turns the classes of interest into objects
 (connected regions with bounding box): traffic signs, poles (delineator posts
-mostly show up as "Pole"), street lights, guardrails (incl. "Barrier", which
-the model often uses for guardrails in curves and shade).
+mostly show up as "Pole"), street lights, guardrails and barriers (walls,
+concrete barriers; in curves and shade sometimes guardrails).
 
     python tools/detect.py videos/brenner.mp4 --step 3 --trajectory data/brenner_trajectory.csv
 
@@ -14,7 +14,7 @@ combines them.
 
 Writes to data/detect/<video>/:
     detections.csv   one row per region and frame (+ station/position from the trajectory)
-    guardrails.csv   guardrail presence left/right per frame
+    guardrails.csv   guardrail and barrier pixels left/right (whole side / near field) per frame
     overlays/        frames with the classes coloured in
     index.html       contact sheet; click a frame to open it in the fix picker
 
@@ -45,10 +45,11 @@ CLASSES = {
     "Utility Pole": ("utility_pole", (128, 0, 255)),
     "Street Light": ("street_light", (0, 255, 255)),
     "Guard Rail": ("guardrail", (0, 140, 255)),
-    # the model often labels guardrails in curves or shade as "Barrier" (also covers concrete barriers)
+    # concrete barriers, walls next to the road; in curves or shade the model also uses it
+    # for guardrails – track.py decides from the context which barrier parts belong to a guardrail
     "Barrier": ("barrier", (0, 0, 255)),
 }
-RAIL_CLASSES = ("guardrail", "barrier")  # both count as road restraint in guardrails.csv
+RAIL_CLASSES = ("guardrail", "barrier")  # counted separately per side in guardrails.csv
 MIN_AREA = {"guardrail": 400, "barrier": 400}  # pixels; default below
 DEFAULT_MIN_AREA = 30
 
@@ -235,8 +236,11 @@ def main():
                   "image_side", "station_m", "lon", "lat", "heading_deg", "elongation", "tilt_deg"])
     rail_file = open(out_dir / "guardrails.csv", "w", newline="", encoding="utf-8")
     rail = csv.writer(rail_file)
-    # *_near_px: outer lower image parts, i.e. guardrail next to the vehicle rather than far ahead
-    rail.writerow(["frame", "video_time_s", "left_px", "right_px", "left_near_px", "right_near_px", "station_m", "lon", "lat"])
+    # *_near_px: outer lower image parts, i.e. next to the vehicle rather than far ahead;
+    # left_/right_ = guardrail, barrier_* = barrier
+    rail.writerow(["frame", "video_time_s", "left_px", "right_px", "left_near_px", "right_near_px",
+                   "barrier_left_px", "barrier_right_px", "barrier_left_near_px", "barrier_right_near_px",
+                   "station_m", "lon", "lat"])
 
     frames, counts_by_frame, batch = [], {}, []
     started = time.time()
@@ -258,13 +262,14 @@ def main():
                 det.writerow([frame, f"{t:.3f}", name, x1, y1, x2, y2, area, f"{cx:.1f}", f"{cy:.1f}", side,
                               pos.get("station_m", ""), pos.get("lon", ""), pos.get("lat", ""), pos.get("heading_deg", ""),
                               f"{elongation:.2f}", f"{tilt:.1f}"])
-            rail_ids = [i for i, n in class_ids.items() if n in RAIL_CLASSES]
-            rails = np.isin(seg, rail_ids)
-            top = int(rails.shape[0] * 0.3)
+            top = int(seg.shape[0] * 0.3)
             px = lambda m: int(m.sum() * rail_norm)  # pixel counts relative to a 720-line image
-            rail.writerow([frame, f"{t:.3f}", px(rails[:, : width // 2]), px(rails[:, width // 2:]),
-                           px(rails[top:, : int(width * 0.3)]), px(rails[top:, int(width * 0.7):]),
-                           pos.get("station_m", ""), pos.get("lon", ""), pos.get("lat", "")])
+            counts = []
+            for cls in RAIL_CLASSES:
+                m = np.isin(seg, [i for i, n in class_ids.items() if n == cls])
+                counts += [px(m[:, : width // 2]), px(m[:, width // 2:]),
+                           px(m[top:, : int(width * 0.3)]), px(m[top:, int(width * 0.7):])]
+            rail.writerow([frame, f"{t:.3f}", *counts, pos.get("station_m", ""), pos.get("lon", ""), pos.get("lat", "")])
             img = overlay(bgr, seg, class_ids, colours, found)
             cv2.imwrite(str(out_dir / "overlays" / f"{frame:06d}.jpg"), cv2.resize(img, (640, int(640 * img.shape[0] / width))),
                         [cv2.IMWRITE_JPEG_QUALITY, 80])
