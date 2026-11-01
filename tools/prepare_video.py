@@ -9,8 +9,9 @@ Writes next to the input
                       and signs.py cut their crops from it automatically
 Both come from the same decoded frames in one ffmpeg run, so their frame
 numbers match exactly. H.264 because it decodes several times faster than
-VP9/HEVC/AV1 and plays in every browser; a keyframe every second keeps
-seeking fast. Uses NVENC if the ffmpeg build has it, otherwise libx264.
+VP9/HEVC/AV1 and plays in every browser; a keyframe every two seconds keeps
+seeking fast. Expect larger files than a YouTube VP9 source: VP9 packs
+tighter, and re-encoding keeps its artefacts. Uses NVENC if the ffmpeg build has it, otherwise libx264.
 """
 
 import argparse
@@ -72,6 +73,11 @@ def main():
     parser.add_argument("video")
     parser.add_argument("--height", type=int, default=1080, help="lines of the working copy (default 1080)")
     parser.add_argument("--cpu", action="store_true", help="use libx264 even if NVENC is available")
+    # quality: NVENC -cq / x264 -crf, lower = better and larger. The working copy is
+    # analysed at 720 lines anyway; the full copy is used for sign crops (text must stay legible)
+    parser.add_argument("--quality-work", type=int, default=24, help="quality of the working copy (default 24)")
+    parser.add_argument("--quality-full", type=int, default=21, help="quality of the full-resolution copy (default 21)")
+    parser.add_argument("--keyframe", type=float, default=2, help="seconds between keyframes (default 2; shorter seeks faster, files grow)")
     parser.add_argument("--ffmpeg", help="path to ffmpeg (default: from PATH, FFMPEG variable or winget)")
     args = parser.parse_args()
 
@@ -85,7 +91,7 @@ def main():
 
     ffmpeg = find_ffmpeg(args.ffmpeg)
     nvenc = not args.cpu and has_encoder(ffmpeg, "h264_nvenc")
-    gop = round(float(fps))
+    gop = max(1, round(float(fps) * args.keyframe))
     work = src.with_name(src.stem + "_work.mp4")
     full = src.with_name(src.stem + "_full.mp4")
     rate = ["-r", f"{fps.numerator}/{fps.denominator}", "-fps_mode", "cfr"]
@@ -97,10 +103,10 @@ def main():
     if height > args.height:
         scale = f"scale=-2:{args.height}:flags=lanczos"
         cmd += ["-filter_complex", f"[0:v]split=2[w][f];[w]{scale}[ws]",
-                "-map", "[ws]", *rate, *encoder_args(nvenc, 20, gop), str(work),
-                "-map", "[f]", *rate, *encoder_args(nvenc, 18, gop), str(full)]
+                "-map", "[ws]", *rate, *encoder_args(nvenc, args.quality_work, gop), str(work),
+                "-map", "[f]", *rate, *encoder_args(nvenc, args.quality_full, gop), str(full)]
     else:
-        cmd += ["-map", "0:v:0", *rate, *encoder_args(nvenc, 18, gop), str(work)]
+        cmd += ["-map", "0:v:0", *rate, *encoder_args(nvenc, args.quality_full, gop), str(work)]
         full = None
 
     print(f"{src.name}: {width}x{height} @ {float(fps):.3f} fps -> {work.name}"
