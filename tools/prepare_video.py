@@ -14,6 +14,7 @@ seeking fast. Uses NVENC if the ffmpeg build has it, otherwise libx264.
 """
 
 import argparse
+import os
 import shutil
 import subprocess
 from fractions import Fraction
@@ -25,10 +26,16 @@ COMMON_RATES = [Fraction(24000, 1001), Fraction(24), Fraction(25), Fraction(3000
                 Fraction(50), Fraction(60000, 1001), Fraction(60)]
 
 
-def find_ffmpeg():
-    exe = shutil.which("ffmpeg")
+def find_ffmpeg(explicit=None):
+    if explicit:
+        return explicit
+    exe = shutil.which("ffmpeg") or os.environ.get("FFMPEG")
     if exe:
         return exe
+    # winget installs a link here; a shell opened before the install does not have it on PATH yet
+    links = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links" / "ffmpeg.exe"
+    if links.exists():
+        return str(links)
     try:
         import imageio_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
@@ -65,6 +72,7 @@ def main():
     parser.add_argument("video")
     parser.add_argument("--height", type=int, default=1080, help="lines of the working copy (default 1080)")
     parser.add_argument("--cpu", action="store_true", help="use libx264 even if NVENC is available")
+    parser.add_argument("--ffmpeg", help="path to ffmpeg (default: from PATH, FFMPEG variable or winget)")
     args = parser.parse_args()
 
     src = Path(args.video)
@@ -75,7 +83,7 @@ def main():
     if not width:
         raise SystemExit(f"Cannot read {src}")
 
-    ffmpeg = find_ffmpeg()
+    ffmpeg = find_ffmpeg(args.ffmpeg)
     nvenc = not args.cpu and has_encoder(ffmpeg, "h264_nvenc")
     gop = round(float(fps))
     work = src.with_name(src.stem + "_work.mp4")
