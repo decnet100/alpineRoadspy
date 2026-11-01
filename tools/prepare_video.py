@@ -9,7 +9,7 @@ Writes next to the input
                       and signs.py cut their crops from it automatically
 Both come from the same decoded frames in one ffmpeg run, so their frame
 numbers match exactly. H.264 because it decodes several times faster than
-VP9/HEVC/AV1 and plays in every browser; a keyframe every two seconds keeps
+VP9/HEVC/AV1 and plays in every browser; a keyframe every second keeps
 seeking fast. Expect larger files than a YouTube VP9 source: VP9 packs
 tighter, and re-encoding keeps its artefacts. Uses NVENC if the ffmpeg build has it, otherwise libx264.
 """
@@ -73,11 +73,11 @@ def main():
     parser.add_argument("video")
     parser.add_argument("--height", type=int, default=1080, help="lines of the working copy (default 1080)")
     parser.add_argument("--cpu", action="store_true", help="use libx264 even if NVENC is available")
-    # quality: NVENC -cq / x264 -crf, lower = better and larger. The working copy is
-    # analysed at 720 lines anyway; the full copy is used for sign crops (text must stay legible)
-    parser.add_argument("--quality-work", type=int, default=24, help="quality of the working copy (default 24)")
-    parser.add_argument("--quality-full", type=int, default=21, help="quality of the full-resolution copy (default 21)")
-    parser.add_argument("--keyframe", type=float, default=2, help="seconds between keyframes (default 2; shorter seeks faster, files grow)")
+    # quality: NVENC -cq / x264 -crf, lower = better and larger. Defaults favour quality over
+    # disk space: the full copy is used for sign crops, where fine text must survive
+    parser.add_argument("--quality-work", type=int, default=20, help="quality of the working copy (default 20)")
+    parser.add_argument("--quality-full", type=int, default=18, help="quality of the full-resolution copy (default 18)")
+    parser.add_argument("--keyframe", type=float, default=1, help="seconds between keyframes (default 1; seeking in the fix picker; longer = smaller files)")
     parser.add_argument("--ffmpeg", help="path to ffmpeg (default: from PATH, FFMPEG variable or winget)")
     args = parser.parse_args()
 
