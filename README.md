@@ -118,21 +118,25 @@ the handlebar, which steer) are noted once per video as boxes/polygons in
 the pixels of a reference frame: `--grid T` writes that frame with a pixel
 grid to `data/cockpit/<video>_ref.jpg`, the parts go into
 `data/cockpit/<video>.json` (example: `docs/cockpit_example.json`). The
-tool then finds the cockpit in 10 frames per second by matching the edges of
-those parts (robust to shade, backlight and tunnels, also when partly out of
-the image) and writes `<video>_cockpit.csv`: cockpit position and rotation in
+tool then finds the cockpit in 10 frames per second by matching the edge
+directions of those parts (robust to shade, backlight and tunnels, also when
+partly out of the image; only where the cockpit can plausibly be, with a
+fresh search every second so that a lock on rock or guardrail texture does
+not persist) and writes `<video>_cockpit.csv`: cockpit position and rotation in
 the image, and the lean angle of the vehicle = roll of the scene above the
 cockpit minus roll of the cockpit.
 
 On the Samnaun 2 ride the lean agrees with the lean expected from the
-trajectory (v x turn rate / g) with r = 0.71 and the right magnitude, without
-calibration. Speed from lean and road curvature is right on average but
+trajectory (v x turn rate / g) with r = 0.80 in the first three minutes and
+0.70 over the 6½ minutes with fixes (where fixes are sparse the expected lean
+itself is less certain), with the right magnitude and without calibration. Speed from lean and road curvature is right on average but
 scatters by about ±9 km/h, far more than the engine sound; the lean is more
 useful for timing curves. Subtracting the head's turning (from the cockpit's
 sideways shift) did not improve the comparison of camera turning with the
 road – leaning and head movements also shift the near cockpit – so it is not
-applied. About 0.5 s per video second on a CPU for 4K input (the search
-stays near the previous position; no GPU needed).
+applied. About 1 s per video second and CPU core for 4K input; the video is
+split into one-minute parts processed in parallel (`--workers`, default: all
+cores but one).
 
 ## Reviewing results
 

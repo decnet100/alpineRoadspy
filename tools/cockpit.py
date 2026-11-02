@@ -12,10 +12,12 @@ handlebar, which steer) show where the camera points relative to the vehicle.
    data/cockpit/<video>_ref.jpg. Pick a frame with the whole cockpit in view and
    note the rigid parts as boxes [x0, y0, x1, y1] and/or polygons [[x, y], ...]
    in that frame's pixels (see docs/cockpit_example.json).
-2. With the config the cockpit is found in every sampled frame: the edges of
-   those parts (gradient image, robust to lighting) are searched at a few angles,
-   allowing the cockpit to be partly outside the image, and refined by
-   ECC alignment. Jumps are filtered out afterwards.
+2. With the config the cockpit is found in every sampled frame: the edge
+   directions of those parts (robust to lighting) are searched at a few angles
+   near the previous position, and once per second in the whole region where
+   the cockpit can plausibly be, allowing it to be partly outside the image;
+   then refined by ECC alignment. Jumps are filtered out afterwards. The video
+   is processed in one-minute parts in parallel (--workers).
 3. The camera's roll in the world comes from the scene above the cockpit (frame
    to frame, integrated; slow drift removed over 30 s). Lean of the vehicle =
    camera roll in the world - camera roll relative to the cockpit; positive =
@@ -29,7 +31,7 @@ Writes <video>_cockpit.csv next to the video:
     lean_deg                 lean of the vehicle
 
 On the Samnaun 2 ride (Tiger 1050) the lean agrees with v * omega / g from the
-trajectory with r = 0.71 and slope 0.96. Head yaw from the cockpit's shift did
+trajectory with r = 0.80 in the first three minutes and 0.70 over 6.5 minutes. Head yaw from the cockpit's shift did
 not improve the comparison of camera turning with the road: leaning and head
 movements shift the near cockpit as well.
 """
@@ -37,6 +39,7 @@ movements shift the near cockpit as well.
 import argparse
 import csv
 import json
+import os
 import time
 from pathlib import Path
 
@@ -47,6 +50,7 @@ from detect import parse_time
 
 WIDTH = 960           # processing width
 ANGLES = range(-15, 16, 3)
+FULL_EVERY = 10       # samples between searches of the whole plausible region
 RADIUS = 40          # px at processing width: search radius around the previous position
 
 
@@ -83,10 +87,17 @@ def write_grid(video, t, out):
     print(f"{w}x{h} frame at {t} s with grid -> {out}")
 
 
-def gradient(img):
+def edges(img):
+    """(edge strength, edge orientation): strength for the ECC refinement; orientation as
+    strength x (cos 2a, sin 2a), the same for light-on-dark and dark-on-light edges, for the
+    search - rock, tree or guardrail texture matches the cockpit's edge directions far
+    worse than its mere edge strength."""
     gray = cv2.GaussianBlur(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32), (0, 0), 1.5)
-    mag = cv2.magnitude(cv2.Sobel(gray, cv2.CV_32F, 1, 0), cv2.Sobel(gray, cv2.CV_32F, 0, 1))
-    return np.sqrt(mag / (np.percentile(mag, 99) + 1e-6))
+    gx, gy = cv2.Sobel(gray, cv2.CV_32F, 1, 0), cv2.Sobel(gray, cv2.CV_32F, 0, 1)
+    mag = cv2.magnitude(gx, gy)
+    strength = np.sqrt(mag / (np.percentile(mag, 99) + 1e-6))
+    a2 = 2 * np.arctan2(gy, gx)
+    return strength, np.dstack([strength * np.cos(a2), strength * np.sin(a2)]).astype(np.float32)
 
 
 class Cockpit:
@@ -114,15 +125,24 @@ class Cockpit:
         self.top = allp[:, 1].min()                      # upper edge of the cockpit parts
         self.centre = ((self.x0 + self.x1) / 2, (self.y0 + self.y1) / 2)
         self.pad = (self.y1 - self.y0) // 2
-        self.ref = gradient(ref)
+        self.ref, orient = edges(ref)
         self.templates = []
         for a in ANGLES:
             rot = cv2.getRotationMatrix2D(self.centre, a, 1.0)
             size = (self.ref.shape[1], self.ref.shape[0])
-            tg = cv2.warpAffine(self.ref * (self.mask > 0), rot, size)[self.y0:self.y1, self.x0:self.x1]
+            # rotating the image by a turns edge orientations by -a: 2a in the doubled-angle channels
+            c, s_ = np.cos(np.radians(-2 * a)), np.sin(np.radians(-2 * a))
+            turned = np.dstack([orient[..., 0] * c - orient[..., 1] * s_, orient[..., 0] * s_ + orient[..., 1] * c]).astype(np.float32)
+            tg = cv2.warpAffine(turned * (self.mask > 0)[..., None].astype(np.float32), rot, size)[self.y0:self.y1, self.x0:self.x1]
             tm = cv2.warpAffine(self.mask, rot, size, flags=cv2.INTER_NEAREST)[self.y0:self.y1, self.x0:self.x1]
             self.templates.append((a, tg, tm))
-        self.last = None
+        self.last, self.count = None, 0
+        # where the cockpit can plausibly be (top-left of the template in the padded image):
+        # up to 20 % of the height higher (looking down) or 40 % lower, 40 % of the width aside
+        h, w = ref.shape[:2]
+        p = self.pad
+        self.region = (self.x0 + p - int(0.4 * w), self.y0 + p - int(0.2 * h),
+                       self.x0 + p + int(0.4 * w), self.y0 + p + int(0.4 * h))
         self.ref_crop = np.ascontiguousarray(self.ref[self.y0:self.y1, self.x0:self.x1])
         self.mask_crop = np.ascontiguousarray(self.mask[self.y0:self.y1, self.x0:self.x1])
 
@@ -149,20 +169,24 @@ class Cockpit:
 
     def locate(self, small):
         """(2x3 transform reference -> frame at processing scale, match score).
-        Searches near the previous result first (position +-RADIUS, angle +-3 degrees)
-        and the whole image at all angles only if that match is clearly worse."""
-        grad = gradient(small)
+        Searches near the previous result (position +-RADIUS, angle +-3 degrees); the whole
+        plausible region at all angles if that match is clearly worse and once per
+        FULL_EVERY samples, so that a lock on background texture does not persist."""
+        grad, orient = edges(small)
         p = self.pad
-        padded = cv2.copyMakeBorder(grad, p, p, p, p, cv2.BORDER_CONSTANT, value=0)
+        padded = cv2.copyMakeBorder(orient, p, p, p, p, cv2.BORDER_CONSTANT, value=0)
         best = None
         if self.last:
             score0, a0, (lx0, ly0) = self.last
             best = self.search(padded, [a for a in ANGLES if abs(a - a0) <= 3],
                                (lx0 - RADIUS, ly0 - RADIUS, lx0 + RADIUS, ly0 + RADIUS))
-            if best and best[0] < max(0.75, score0 - 0.05):
+            if best and best[0] < score0 - 0.05:
                 best = None
-        if best is None:
-            best = self.search(padded, list(ANGLES))
+        if best is None or self.count % FULL_EVERY == 0:
+            full = self.search(padded, list(ANGLES), self.region)
+            if best is None or full[0] > best[0] + 0.02:
+                best = full
+        self.count += 1
         self.last = best
         score, a, (lx, ly) = best
         warp = cv2.getRotationMatrix2D(self.centre, a, 1.0).astype(np.float32)
@@ -236,7 +260,41 @@ def track(video, config, start=0.0, end=None, rate=10.0, progress=True):
     return rows, step / fps, w0
 
 
-def lean(rows, dt, width, min_score=0.75):
+def track_chunk(job):
+    """track() for one time range in a worker process (one OpenCV thread each)."""
+    video, config, start, end, rate = job
+    cv2.setNumThreads(1)
+    return track(video, config, start, end, rate, progress=False)
+
+
+def track_parallel(video, config, start, end, rate, workers, chunk_s=60):
+    """track() over [start, end) in chunks of about chunk_s seconds on `workers` processes.
+    Each chunk starts with a search of the whole plausible region; the scene roll
+    across a chunk border is lost (one sample in 600)."""
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    cap = cv2.VideoCapture(str(video))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) / fps
+    end = total if end is None else min(end, total)
+    step = max(1, round(fps / rate))
+    # chunk borders on the sampling grid, so that the samples are the same as in one run
+    frames = np.arange(round(start * fps), round(end * fps) + 1, step * max(1, round(chunk_s * fps / step)))
+    borders = list(frames / fps) + ([end] if frames[-1] / fps < end else [])
+    jobs = [(video, config, a, b, rate) for a, b in zip(borders, borders[1:]) if b > a]
+    rows, width, started, done = [], 1, time.time(), 0
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(track_chunk, job) for job in jobs]
+        for fut in as_completed(futures):
+            part, _, width = fut.result()
+            rows += part
+            done += 1
+            print(f"  cockpit: {done}/{len(jobs)} parts, {time.time() - started:.0f} s", flush=True)
+    rows.sort(key=lambda r: r[0])
+    return rows, step / fps, width
+
+
+def lean(rows, dt, width, min_score=0.3):
     """Mark outliers and compute the lean angle (degrees, + = right) per row."""
     from scipy.ndimage import median_filter
 
@@ -262,6 +320,8 @@ def main():
     parser.add_argument("--start", default="0")
     parser.add_argument("--end")
     parser.add_argument("--rate", type=float, default=10, help="samples per second (default 10)")
+    parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1),
+                        help="parallel processes (default: number of CPU cores - 1)")
     args = parser.parse_args()
 
     video = Path(args.video)
@@ -274,7 +334,11 @@ def main():
         raise SystemExit(f"No cockpit config {config_path}: start with --grid T")
     config = json.loads(config_path.read_text(encoding="utf-8"))
     print(f"Tracking the cockpit in {video.name} ...", flush=True)
-    rows, dt, width = track(video, config, parse_time(args.start), parse_time(args.end) if args.end else None, args.rate)
+    start, end = parse_time(args.start), parse_time(args.end) if args.end else None
+    if args.workers > 1:
+        rows, dt, width = track_parallel(video, config, start, end, args.rate, args.workers)
+    else:
+        rows, dt, width = track(video, config, start, end, args.rate)
     ok, lean_deg = lean(rows, dt, width)
     with open(cockpit_path(video), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
