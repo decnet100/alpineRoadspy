@@ -45,7 +45,9 @@ found by a brightness-independent comparison of consecutive frames (tunnel
 portals and exposure changes do not count, fades through black do). The fix
 picker marks them on the time bar, does not interpolate or extrapolate across
 them and asks for a fix shortly before and after each cut; track.py does not
-track across them.
+track across them. Cuts the detection missed (soft cross-fades) or detected wrongly
+can be set or removed in the fix picker with `X` at the current position;
+those edits are kept in `data/cuts/<video>.json` and used by track.py too.
 
 ## Reviewing results
 

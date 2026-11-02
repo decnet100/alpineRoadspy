@@ -21,6 +21,8 @@
   #seek { width: 100%; margin: 0; }
   #cutMarks { position: absolute; left: 0; right: 0; top: 0; height: 100%; pointer-events: none; }
   #cutMarks span { position: absolute; top: 0; width: 2px; height: 100%; background: #d50000; }
+  #cutMarks span.manual { background: #2962ff; width: 3px; }
+  #cutMarks span.removed { background: #9e9e9e; opacity: .6; }
   button, label.btn { font: inherit; padding: 3px 8px; border: 1px solid #aaa; border-radius: 3px;
                       background: #f4f4f4; cursor: pointer; white-space: nowrap; }
   button:hover, label.btn:hover { background: #e6e6e6; }
@@ -69,6 +71,7 @@
       <button id="bPlay" title="Leertaste">▶</button>
       <button id="bNextFrame" title="→">Frame ▶</button>
       <button id="bFwd1s" title="Shift+→">+1 s</button>
+      <button id="bCut" title="X: Schnitt an dieser Stelle setzen oder entfernen">✂ Schnitt</button>
       <select id="rate" title="Geschwindigkeit">
         <option value="0.25">0,25×</option><option value="0.5">0,5×</option><option value="1" selected>1×</option>
         <option value="2">2×</option><option value="4">4×</option><option value="8">8×</option>
@@ -95,7 +98,7 @@
       <summary>Bedienung</summary>
       <kbd>Leertaste</kbd> Play/Pause · <kbd>←</kbd>/<kbd>→</kbd> 1 Frame · <kbd>Shift</kbd>+<kbd>←</kbd>/<kbd>→</kbd> 1 s ·
       <kbd>Strg</kbd>+<kbd>←</kbd>/<kbd>→</kbd> 10 s · <kbd>Entf</kbd> gewählten Fixpunkt löschen ·
-      <kbd>N</kbd>/<kbd>P</kbd> nächster/vorheriger Fixpunkt · <kbd>R</kbd> andere Straße für gewählten Fixpunkt.<br>
+      <kbd>N</kbd>/<kbd>P</kbd> nächster/vorheriger Fixpunkt · <kbd>R</kbd> andere Straße für gewählten Fixpunkt · <kbd>X</kbd> Schnitt setzen/entfernen.<br>
       Klick in die Karte setzt einen Fixpunkt zur aktuellen Videozeit (existiert dort schon einer, wird er verschoben).
       Jeder Fixpunkt wird auf die nächste Straße im Fangradius bezogen; zwischen zwei Fixpunkten wird der kürzeste Weg
       im Straßennetz gesucht (auch über Straßenwechsel) und die Position mit konstanter Geschwindigkeit entlang dieses
@@ -184,8 +187,10 @@ const video = document.getElementById('video');
 const $ = (id) => document.getElementById(id);
 // fixes: { id, t, lat, lon, sigma, note, snapIdx, snapManual } + derived: snap, cands, candList, station, offset
 // routes[i]: path between fixes i and i+1: { path: RoadNet.Path, ok, roads, offA, offB }
-// cuts: times (s) where the video jumps (from <video>_cuts.csv of prepare_video.py)
-const state = { videoName: null, fixes: [], routes: [], ext: null, selected: null, nextId: 1, cuts: [] };
+// cuts: effective times (s) where the video jumps = detected (<video>_cuts.csv of prepare_video.py)
+// + added by hand - rejected by hand (data/cuts/<video>.json)
+const state = { videoName: null, fixes: [], routes: [], ext: null, selected: null, nextId: 1, cuts: [],
+                autoCuts: [], cutEdits: { added: [], removed: [] } };
 const cutBetween = (t0, t1) => state.cuts.some((c) => c > t0 + 1e-6 && c <= t1 + 1e-6);
 let fpsUserSet = false;
 
@@ -622,28 +627,67 @@ function updatePosition() {
 
 // ---------- video ----------
 
-function loadCuts(src) {
-  state.cuts = [];
-  renderCutMarks();
+const near = (list, t) => list.find((x) => Math.abs(x - t) < 0.5);
+const cutEditsPath = () => `data/cuts/${(state.videoName || '').replace(/\.[^.]+$/, '')}.json`;
+
+function effectiveCuts() {
+  const { added, removed } = state.cutEdits;
+  const cuts = state.autoCuts.filter((t) => near(removed, t) === undefined);
+  added.forEach((t) => { if (near(cuts, t) === undefined) cuts.push(t); });
+  state.cuts = cuts.sort((a, b) => a - b);
+}
+
+async function loadCuts(src) {
+  state.autoCuts = []; state.cutEdits = { added: [], removed: [] };
+  effectiveCuts(); renderCutMarks();
   if (!/^\//.test(src)) return;   // only for videos served by serve.py
-  fetch(src.replace(/\.[^./]+$/, '_cuts.csv')).then((r) => r.ok ? r.text() : '').then((text) => {
-    state.cuts = text.trim().split(/\r?\n/).slice(1).map((l) => parseFloat(l.split(',')[1])).filter(isFinite);
-    renderCutMarks();
-    if (state.cuts.length) status(`${state.cuts.length} Schnitte im Video – dort keine Interpolation; vor und nach jedem Schnitt einen Fixpunkt setzen.`);
-    refresh();
-  }).catch(() => {});
+  try {
+    const r = await fetch(src.replace(/\.[^./]+$/, '_cuts.csv'));
+    if (r.ok) state.autoCuts = (await r.text()).trim().split(/\r?\n/).slice(1).map((l) => parseFloat(l.split(',')[1])).filter(isFinite);
+  } catch (err) { /* no cut list */ }
+  try {
+    const r = await fetch('/' + cutEditsPath());
+    if (r.ok) state.cutEdits = Object.assign({ added: [], removed: [] }, await r.json());
+  } catch (err) { /* no manual edits */ }
+  effectiveCuts(); renderCutMarks();
+  if (state.cuts.length) status(`${state.cuts.length} Schnitte im Video – dort keine Interpolation; vor und nach jedem Schnitt einen Fixpunkt setzen.`);
+  refresh();
+}
+
+// X / button: add a cut here, or remove the one within 0.5 s (detected cuts are marked rejected)
+async function toggleCut() {
+  if (!state.videoName) return;
+  const t = video.currentTime, e = state.cutEdits;
+  const manual = near(e.added, t), auto = near(state.autoCuts, t), rejected = near(e.removed, t);
+  if (manual !== undefined) e.added = e.added.filter((x) => x !== manual);
+  else if (auto !== undefined && rejected === undefined) e.removed.push(auto);
+  else if (rejected !== undefined) e.removed = e.removed.filter((x) => x !== rejected);
+  else e.added.push(+t.toFixed(3));
+  effectiveCuts(); renderCutMarks(); refresh();
+  try {
+    const res = await fetch(`/api/save?path=${encodeURIComponent(cutEditsPath())}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Alpineroadspy': '1' }, body: JSON.stringify(e, null, 1) });
+    if (!res.ok) throw new Error((await res.json()).error);
+    status(`Schnitte: ${state.cuts.length} (gespeichert in ${cutEditsPath()})`);
+  } catch (err) {
+    status(`Schnitt geändert, aber nicht gespeichert (${err.message}) – nur über serve.py möglich.`);
+  }
 }
 
 function renderCutMarks() {
   const box = $('cutMarks');
   box.innerHTML = '';
   if (!isFinite(video.duration)) return;
-  for (const c of state.cuts) {
+  const mark = (t, cls, title) => {
     const m = document.createElement('span');
-    m.style.left = `${(100 * c / video.duration).toFixed(3)}%`;
-    m.title = `Schnitt bei ${c.toFixed(1)} s`;
+    m.className = cls;
+    m.style.left = `${(100 * t / video.duration).toFixed(3)}%`;
+    m.title = title;
     box.appendChild(m);
-  }
+  };
+  state.autoCuts.forEach((t) => near(state.cutEdits.removed, t) === undefined
+    ? mark(t, '', `Schnitt bei ${t.toFixed(1)} s (erkannt)`) : mark(t, 'removed', `verworfen: ${t.toFixed(1)} s`));
+  state.cutEdits.added.forEach((t) => mark(t, 'manual', `Schnitt bei ${t.toFixed(1)} s (von Hand)`));
 }
 
 function loadVideo(src, name) {
@@ -715,6 +759,7 @@ $('bPrevFrame').onclick = () => stepFrames(-1);
 $('bNextFrame').onclick = () => stepFrames(1);
 $('bBack1s').onclick = () => stepSeconds(-1);
 $('bFwd1s').onclick = () => stepSeconds(1);
+$('bCut').onclick = () => { toggleCut(); $('bCut').blur(); };
 $('rate').onchange = () => { video.playbackRate = parseFloat($('rate').value); $('rate').blur(); };
 $('fps').onchange = () => { fpsUserSet = true; renderTable(); save(); };
 $('seek').addEventListener('input', () => { video.currentTime = parseFloat($('seek').value); });
@@ -732,6 +777,7 @@ document.addEventListener('keydown', (e) => {
     case 'n': case 'N': jumpFix(1); break;
     case 'p': case 'P': jumpFix(-1); break;
     case 'r': case 'R': cycleRoad(state.fixes.find((f) => f.id === state.selected)); break;
+    case 'x': case 'X': toggleCut(); break;
     default: return;
   }
   e.preventDefault();

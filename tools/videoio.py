@@ -31,18 +31,32 @@ def cuts_path(video):
     return video.with_name(video.stem + "_cuts.csv")
 
 
+def manual_cuts_path(video):
+    """data/cuts/<name>.json: cuts added or rejected by hand in the fix picker."""
+    return Path(__file__).resolve().parent.parent / "data" / "cuts" / f"{Path(video).stem}.json"
+
+
 def read_cuts(video):
-    """Frame numbers where a new shot starts (empty if no cut list exists)."""
+    """Frame numbers where a new shot starts: the detected cuts (<name>_cuts.csv)
+    plus those added by hand, minus those rejected by hand (data/cuts/<name>.json,
+    times in seconds, matched within 0.5 s)."""
     import csv
+    import json
 
-    path = cuts_path(video)
-    if not path.exists():
-        return []
-    with open(path, newline="", encoding="utf-8") as f:
-        return sorted(int(r["frame"]) for r in csv.DictReader(f))
+    path, manual = cuts_path(video), manual_cuts_path(video)
+    fps = cv2.VideoCapture(str(video)).get(cv2.CAP_PROP_FPS) or 30
+    times = []
+    if path.exists():
+        with open(path, newline="", encoding="utf-8") as f:
+            times = [float(r["time_s"]) for r in csv.DictReader(f)]
+    if manual.exists():
+        edits = json.loads(manual.read_text(encoding="utf-8"))
+        times = [t for t in times if not any(abs(t - r) < 0.5 for r in edits.get("removed", []))]
+        times += [t for t in edits.get("added", []) if not any(abs(t - x) < 0.5 for x in times)]
+    return sorted(round(t * fps) for t in times)
 
 
-def detect_cuts(video, min_score=0.25, quiet=0.3, progress=True):
+def detect_cuts(video, min_score=0.25, quiet=0.3, max_gap_s=0.5, progress=True):
     """Hard cuts: frames that differ abruptly from the previous one while the
     frames around them change smoothly.
 
@@ -52,8 +66,12 @@ def detect_cuts(video, min_score=0.25, quiet=0.3, progress=True):
     `min_score` and the nearest real neighbours on both sides differ less than
     `quiet` times as much (fast pans change many frames in a row). Exact
     duplicate frames, common in re-encoded online videos, are skipped when
-    looking for neighbours. Black or uniform frames are skipped altogether: a
-    fade is no cut, but the frames before and after a black gap are compared.
+    looking for neighbours. Black, uniform and very dark low-contrast frames
+    (unlit tunnels, where a passing lamp would otherwise look like a new scene)
+    are skipped: a fade is no cut, but across a short black gap (<= `max_gap_s`,
+    a cut through black) the frames before and after it are compared – not
+    across dark tunnel frames or a long gap, or a tunnel's entry and exit would
+    count as a cut.
     Returns [(frame, time_s, score)].
     """
     import time
@@ -63,22 +81,26 @@ def detect_cuts(video, min_score=0.25, quiet=0.3, progress=True):
     cap = cv2.VideoCapture(str(video))
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
-    diffs, last, gap_start, frame, started = [], None, None, 0, time.time()
+    diffs, last, gap_start, gap_black, frame, started = [], None, None, True, 0, time.time()
+    max_gap = max(1, round(max_gap_s * fps))
     while True:
         ok, img = cap.read()
         if not ok:
             break
         small = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), (96, 54), interpolation=cv2.INTER_AREA).astype(np.float32)
         small = cv2.GaussianBlur(small, (3, 3), 0)
-        std = small.std()
-        if std <= 2:                       # black / uniform frame: remember where the gap began
-            gap_start = frame if gap_start is None else gap_start
+        std, mean = small.std(), small.mean()
+        if std <= 2 or (mean < 40 and std < 8):   # black, uniform or dark low-contrast: part of a gap
+            if gap_start is None:
+                gap_start, gap_black = frame, True
+            gap_black = gap_black and std <= 2      # only a truly black gap may hide a cut
             diffs.append(0.0)
         else:
             norm = (small - small.mean()) / std
             d = float(1 - (norm * last).mean()) if last is not None else 0.0
             if gap_start is not None and gap_start > 0 and last is not None:
-                diffs[gap_start] = d       # cut across a black gap: counted at its first frame
+                if gap_black and frame - gap_start <= max_gap:
+                    diffs[gap_start] = d   # cut through a short black gap: counted at its first frame
                 diffs.append(0.0)
             else:
                 diffs.append(d)
