@@ -108,6 +108,7 @@
         <span><span class="lg" style="background:#ef6c00"></span>gemessen (Bildbewegung)</span>
         <span><span class="lg" style="background:#1565c0"></span>erwartet (Straßenkrümmung entlang der Route)</span>
         <label title="Geschwindigkeit zwischen Fixpunkten aus dem Kurvenverlauf statt konstant"><input type="checkbox" id="speedFromCurves" checked> Geschwindigkeit aus Kurven</label>
+        <label title="Höchstgeschwindigkeit für die Kurvenangleichung; wird je Abschnitt angehoben, falls dessen Durchschnitt es verlangt">max. <input type="number" id="vmax" min="20" max="300" step="5" value="110" style="width:4em"> km/h</label>
         <label>Fenster <select id="motionWin"><option>15</option><option selected>30</option><option>60</option><option>120</option></select> s</label>
         <span id="motionInfo"></span>
       </div>
@@ -514,7 +515,8 @@ function fitTimings(routes, fixes) {
     const a = fixes[i], b = fixes[i + 1];
     if (!r.ok || b.t - a.t < 1 || r.path.length < 5 || cutBetween(a.t, b.t)) return;
     const theta = roadHeading(r.path);
-    r.timing = SpeedFit.fitSection({ duration: b.t - a.t, length: r.path.length, thetaAt: theta, turnAt: (t) => turnAt(a.t + t) });
+    r.timing = SpeedFit.fitSection({ duration: b.t - a.t, length: r.path.length, thetaAt: theta, turnAt: (t) => turnAt(a.t + t),
+                                     vmax: (parseFloat($('vmax').value) || 110) / 3.6 });
   });
 }
 
@@ -839,6 +841,8 @@ $('motion').addEventListener('click', (e) => {
 $('motionWin').onchange = () => { drawMotion(); $('motionWin').blur(); };
 $('speedFromCurves').onchange = () => { localStorage.setItem('fixpicker:speedFromCurves', $('speedFromCurves').checked ? '1' : '0'); $('speedFromCurves').blur(); scheduleRouting(); };
 $('speedFromCurves').checked = localStorage.getItem('fixpicker:speedFromCurves') !== '0';
+$('vmax').onchange = () => { localStorage.setItem('fixpicker:vmax', $('vmax').value); scheduleRouting(); };
+$('vmax').value = localStorage.getItem('fixpicker:vmax') || '110';
 window.addEventListener('resize', drawMotion);
 $('laneMode').onchange = () => { localStorage.setItem('fixpicker:lane', $('laneMode').value); $('laneMode').blur(); scheduleRouting(); };
 $('laneWidth').onchange = () => { localStorage.setItem('fixpicker:laneWidth', $('laneWidth').value); scheduleRouting(); };

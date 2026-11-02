@@ -66,7 +66,8 @@ With "Geschwindigkeit aus Kurven" (on by default when motion data exist)
 the position between two fixes no longer assumes constant speed:
 `tools/speedfit.js` aligns the road heading along the section with the
 heading the camera turned through (dynamic programming over time x station,
-speed 0–108 km/h, penalty on deviating from the mean speed, so straights stay
+speed 0 to 110 km/h (adjustable "max. km/h", raised per section if its mean
+speed needs more), penalty on deviating from the mean speed, so straights stay
 even). Cross-validated on the Samnaun drive by leaving out fixes: with a fix
 every ~25 s the position error at the left-out fixes drops from median 10 m /
 90 % 27 m to 8 m / 20 m, with a fix every ~37 s from 14 m / 38 m to 9 m /

@@ -1,7 +1,9 @@
 // Speed along a section from the camera's turning: align the road heading theta(s)
 // with the heading the camera turned through, Theta(t), between two fixes.
 // Dynamic programming over a time x station grid: monotone s(t) from 0 to L,
-// speed between 0 and vmax, penalty `mu` on deviating from the mean speed (on
+// speed between 0 and vmax (default 110 km/h, adjustable; raised to 1.5x the
+// section's mean speed if that is higher, so the end is always reachable),
+// penalty `mu` on deviating from the mean speed (on
 // straights the heading says nothing, so the speed stays even there). The end
 // mismatch of Theta (drift, scale) is spread linearly over the section.
 // Cross-validated on the Samnaun drive (fixes every ~37 s): position error at
@@ -9,7 +11,7 @@
 'use strict';
 
 const SpeedFit = (() => {
-  function fitSection({ duration, length, thetaAt, turnAt, dt = 0.2, ds = 1.0, vmax = 30, mu = 300 }) {
+  function fitSection({ duration, length, thetaAt, turnAt, dt = 0.2, ds = 1.0, vmax = 110 / 3.6, mu = 300 }) {
     const N = Math.max(1, Math.round(duration / dt));
     const M = Math.max(1, Math.ceil(length / ds));
     const cell = length / M;
@@ -19,7 +21,8 @@ const SpeedFit = (() => {
     const vid = new Float64Array(N + 1);
     const v0 = turnAt(0), endFix = th[M] - (turnAt(duration) - v0);
     for (let i = 0; i <= N; i++) vid[i] = turnAt(i * duration / N) - v0 + endFix * i / N;
-    const kmax = Math.max(1, Math.ceil(vmax * duration / N / cell));
+    const vlim = Math.max(vmax, 1.5 * length / duration);   // never below what the section needs
+    const kmax = Math.min(255, Math.max(1, Math.ceil(vlim * duration / N / cell)));
     const mean = M / N;
     let cost = new Float64Array(M + 1).fill(Infinity);
     cost[0] = 0;
