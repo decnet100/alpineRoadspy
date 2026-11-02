@@ -303,26 +303,34 @@ def pitch_glitches(t, f0, ratio=1.35, window_s=3.0):
     return np.abs(np.log(f0) - ref) > np.log(ratio)
 
 
-def gear_path(f0, ks, vref, valid, sigma=0.35, smooth=0.01, change=5.0):
+def gear_path(f0, ks, vref, valid, sigma=0.35, smooth=0.01, change=5.0, extra=None):
     """Gear index per frame (Viterbi). Two terms:
     - the speed ks[g] * f0 should be close to the reference speed vref (NaN = none),
       relative deviation sigma;
     - the speed is continuous: from one frame (50 ms) to the next it changes by a
       relative `smooth` at most typically, so a pitch jump by the gear step forces the
       gear change at that very moment and a gear change without one is expensive.
-    Frames not `valid` (pitch glitches) are bridged; they get the gear before them."""
+    Frames not `valid` (pitch glitches) are bridged; they get the gear before them, and
+    across them the speed may change in proportion to their length. (Treating coasting
+    phases - clutch pulled while braking - as such gaps made the cross-validation worse.)
+    `extra` (frames x gears) is added to the per-frame cost."""
     idx = np.flatnonzero(valid)
     lk, lf = np.log(ks), np.log(f0[idx])
     em = np.zeros((len(idx), len(ks)))
     m = ~np.isnan(vref[idx])
     em[m] = ((lk[None, :] + lf[m, None] - np.log(vref[idx][m])[:, None]) / sigma) ** 2
+    if extra is not None:
+        em += extra[idx]
     g_count = len(ks)
     cost, back = em[0].copy(), np.zeros((len(idx), g_count), np.int8)
     dk = lk[None, :] - lk[:, None]                     # from gear a (row) to gear b (column)
     jump_cost = np.where(np.abs(np.arange(g_count)[:, None] - np.arange(g_count)[None, :]) > 1, np.inf,
                          change * (np.arange(g_count)[:, None] != np.arange(g_count)[None, :]))
     for i in range(1, len(idx)):
-        trans = ((dk + (lf[i] - lf[i - 1])) / smooth) ** 2 + jump_cost
+        # across a gap (bridged frames, clutch pulled) the speed may change more: braking or
+        # accelerating goes on while the pitch says nothing about it
+        gap = idx[i] - idx[i - 1]
+        trans = ((dk + (lf[i] - lf[i - 1])) / (smooth * gap)) ** 2 + jump_cost
         total = cost[:, None] + trans
         back[i] = np.argmin(total, axis=0)
         cost = total[back[i], np.arange(g_count)] + em[i]
@@ -356,6 +364,41 @@ def speed_from_path(t, f0, ks, path, valid, ratio=1.15, window_s=2.0):
     return v
 
 
+def match_distances(t, f0, ks, valid, pairs, path, iters=40, rate=0.5, sigma=1.0):
+    """Refine the gears so that each fix interval's distance is matched as a whole, with
+    the speed's course left to continuity: the pull towards the interval's *mean* speed
+    is weakened (sigma) and replaced by a cost per metre driven, raised or lowered per
+    interval (Lagrange multiplier) until the integrated speed matches its distance.
+    In a tunnel ridden at 41-92 km/h the mean pulled the gear down by one."""
+    dt = t[1] - t[0]
+    ks = np.asarray(ks)
+    inter = np.full(len(t), -1)
+    for k, (a, b, sa, sb) in enumerate(pairs):
+        inter[(t >= a) & (t < b)] = k
+    dist = np.array([sb - sa for a, b, sa, sb in pairs])
+    vref = np.full(len(t), np.nan)
+    for k, (a, b, sa, sb) in enumerate(pairs):
+        vref[inter == k] = (sb - sa) / (b - a) * 3.6
+    metres = ks[None, :] * f0[:, None] * dt / 3.6               # per frame and gear
+    lam = np.zeros(len(pairs))
+    # short intervals: the fixes' +-5 m weigh too much to steer the gears by their distance
+    trusted = np.array([b - a >= 10 for a, b, sa, sb in pairs], float)
+
+    def errors(p):
+        v = speed_from_path(t, f0, ks, p, valid)
+        return np.array([v[inter == k].sum() * dt / 3.6 for k in range(len(pairs))]) - dist
+
+    best_path, best_e = path, errors(path)
+    for _ in range(iters):
+        extra = np.where(inter[:, None] >= 0, lam[np.maximum(inter, 0)][:, None] * metres, 0.0)
+        p = gear_path(f0, ks, vref, valid, sigma=sigma, extra=extra)
+        e = errors(p)
+        if np.abs(e).sum() < np.abs(best_e).sum():
+            best_path, best_e = p, e
+        lam = np.clip(lam + rate * e / np.maximum(dist, 20) * 10 * trusted, -50, 50)
+    return best_path, list(best_e)
+
+
 def fit_from_fixes(t, f0, events, fixes, step, gears=6):
     """Gear constants from the distances between fixes, without speed readings.
 
@@ -364,8 +407,9 @@ def fit_from_fixes(t, f0, events, fixes, step, gears=6):
     pitch jumps (continuity of the speed, see gear_path); k0 is chosen so that the integrated speed best matches the distances
     along the route between the fixes. Returns (constants, gear per frame,
     distance errors in m per fix interval).
-    On the Samnaun 2 ride the speed agrees with the speedometer (corrected by its 6 %
-    over-reading) within median 0.7 km/h, 90 % 2 km/h."""
+    On the Samnaun 2 ride the speed agrees with 63 speedometer readings (corrected by its
+    6 % over-reading) within median 0.8 km/h, 90 % 5.5 km/h; worst in a tunnel while
+    braking with hidden downshifts (one gear too high, up to 29 km/h)."""
     dt = t[1] - t[0]
     pairs = [(a, b, sa, sb) for (a, sa), (b, sb) in zip(fixes, fixes[1:]) if a >= t[0] and b <= t[-1] and b > a]
     if not pairs:
@@ -395,6 +439,7 @@ def fit_from_fixes(t, f0, events, fixes, step, gears=6):
         if r[0] < best[0]:
             best = r
     _, ks, path, e = best
+    path, e = match_distances(t, f0, ks, valid, pairs, path)
     used = sorted(set(path.tolist()))
     return [float(k) for k in ks], path, e, used, valid
 

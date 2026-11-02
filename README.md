@@ -85,7 +85,7 @@ outlined over the video (red where uncertain) with the lean angle.
 Cross-validated on the Samnaun 2 ride by leaving out fixes, with the
 engine-sound gears fitted without them: position error at a left-out fix
 (fixes every ~20-40 s) median 25 m -> 5 m (90 %: 75 -> 22 m); with three
-fixes left out 34 -> 13 m (90 %: 124 -> 43 m).
+fixes left out 34 -> 10 m (90 %: 124 -> 43 m).
 
 ## Speed from the engine sound
 
@@ -106,9 +106,11 @@ The speed is k_gear x f0 with one constant per gear. With the fixes
 speed reading: they form a ladder with the step measured at the upshifts
 (six gears around the typical one); the gear per moment is chosen so that
 the speed stays continuous – a pitch jump by the gear step forces a gear
-change at that moment, a gear change without one is expensive – and close to
-the mean speed of its fix interval; the base constant is chosen so that the
-integrated speed matches the distances along the route between the fixes.
+change at that moment, a gear change without one is expensive. The fixes
+anchor it by distance, not by mean speed: per fix interval (of 10 s or more)
+a cost per metre is raised or lowered until the integrated speed matches the
+distance along the route, so a stretch ridden at 41-92 km/h keeps its
+course; the base constant is chosen the same way over all intervals.
 Stretches tracked at twice the pitch (slow hairpins) are halved, short pitch
 and speed outliers bridged; speed jumps that are left (more than 8 km/h in
 0.5 s) are reported. Alternatively `--readings` (CSV `time_s,speed_kmh`,
@@ -118,10 +120,11 @@ from readings. Results in `data/audio/<video>/` (`track.csv`,
 loads `track.csv` automatically.
 
 On the first 6½ minutes of the Samnaun 2 ride (Triumph Tiger 1050) the step
-is 0.784 and the speed from the fixes agrees with 39 speedometer readings
-(corrected by the speedometer's 6 % over-reading) within median 0.7 km/h,
-90 % 2 km/h, max 4.4 km/h. Left: one shift in a long tunnel that the fixes
-around it do not support (reported as a jump).
+is 0.784 and the speed from the fixes agrees with 63 speedometer readings
+(corrected by the speedometer's 6 % over-reading) within median 0.8 km/h,
+90 % 5.5 km/h. Worst: braking in a tunnel, where the downshifts happen with
+the clutch pulled and leave no jump in the sound – one gear too high, up to
+29 km/h for a few seconds (reported as a jump).
 
 ## Helmet cameras: cockpit and lean angle
 
