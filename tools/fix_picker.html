@@ -46,6 +46,10 @@
   .warn { color: #c00; font-weight: 600; }
   .soft { color: #c62828; }
   #status { padding: 4px 8px; color: #555; border-top: 1px solid #ddd; min-height: 1.3em; }
+  #motionWrap { border-bottom: 1px solid #ddd; padding: 2px 8px 4px; }
+  #motion { width: 100%; height: 130px; display: block; cursor: crosshair; }
+  #motionHead { display: flex; gap: 10px; align-items: center; font-size: 12px; color: #555; flex-wrap: wrap; }
+  .lg { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 3px; }
   #map { height: 100%; }
   .fix-icon div { width: 22px; height: 22px; border-radius: 50%; background: #1565c0; color: #fff;
                   border: 2px solid #fff; box-shadow: 0 0 3px #000; font: 600 11px/22px system-ui;
@@ -85,6 +89,10 @@
       <label>σ <input id="sigmaDefault" type="number" min="0" step="any" value="5"> m</label>
       <label>Straßennetz <select id="roadSource"></select></label>
       <label>Fangradius <input id="snapRadius" type="number" min="1" step="any" value="15"> m</label>
+      <label title="Seitliche Lage der Kamera zur Straßenachse für Trajektorie und Objekte">Spurlage
+        <select id="laneMode"><option value="clicks">aus den Klicks</option><option value="right">rechte Spur</option>
+          <option value="left">linke Spur</option><option value="centre">Fahrbahnmitte</option></select></label>
+      <label>Spurbreite <input id="laneWidth" type="number" min="2" max="5" step="0.05" value="3.25"> m</label>
     </div>
     <div class="bar">
       <label class="btn" title="GPX/GeoJSON-Linie oder objects.geojson aus tools/track.py">Referenz/Objekte… <input id="refFile" type="file" accept=".gpx,.geojson,.json"></label>
@@ -93,6 +101,15 @@
       <button id="bExportGeojson">Export GeoJSON</button>
       <button id="bExportTraj">Export Trajektorie (je Frame)</button>
       <button id="bClear">Alle löschen</button>
+    </div>
+    <div id="motionWrap">
+      <div id="motionHead">
+        <span><span class="lg" style="background:#ef6c00"></span>gemessen (Bildbewegung)</span>
+        <span><span class="lg" style="background:#1565c0"></span>erwartet (Straßenkrümmung, konst. v zwischen Fixpunkten)</span>
+        <label>Fenster <select id="motionWin"><option>15</option><option selected>30</option><option>60</option><option>120</option></select> s</label>
+        <span id="motionInfo"></span>
+      </div>
+      <canvas id="motion"></canvas>
     </div>
     <details>
       <summary>Bedienung</summary>
@@ -471,6 +488,16 @@ function snapFix(f, radius) {
 // (with overlapping datasets or parallel roads the nearest is not always the one driven).
 const snapOptions = (f) => !f.snap ? [] : f.snapManual ? [f.snap] : f.candList.slice(0, 3);
 
+// Lateral position of the camera: from the clicked points, or fixed in a lane (overtaking,
+// closed lanes: switch to the other lane)
+function applyLaneMode(routes, fixes) {
+  const mode = $('laneMode').value, w = parseFloat($('laneWidth').value) || 3.25;
+  if (mode === 'clicks') return;
+  const off = mode === 'right' ? -w / 2 : mode === 'left' ? w / 2 : 0;   // left of the axis positive
+  routes.forEach((r) => { if (r.ok) { r.offA = off; r.offB = off; } });
+  fixes.forEach((f, i) => { if (routes[i]?.ok || routes[i - 1]?.ok) f.offset = off; });
+}
+
 function routePair(a, b) {
   const straight = dist(a, b);
   let best = null;
@@ -558,8 +585,10 @@ async function routeAll() {
     f.offset = routes[i]?.ok ? routes[i].offA : routes[i - 1]?.ok ? routes[i - 1].offB : null;
     if (routes[i]) station += routes[i].path.length;
   });
+  applyLaneMode(routes, fixes);
   state.routes = routes;
   state.ext = buildExtension(fixes, routes);
+  computeExpected();
   renderRoutes();
   renderTable();
   updatePosition();
@@ -604,6 +633,7 @@ function updatePosition() {
   const dur = isFinite(video.duration) ? video.duration : 0;
   $('time').textContent = `${t.toFixed(3)} / ${dur.toFixed(1)} s · F ${frameOf(t)}`;
   if (document.activeElement !== $('seek')) $('seek').value = t;
+  drawMotion();
   let p = position(t);
   const info = $('posInfo');
   if (p && p.cut) {
@@ -624,6 +654,141 @@ function updatePosition() {
     info.textContent = '';
   }
 }
+
+// ---------- motion timeline (camera yaw from the image, prepare_video.py) ----------
+
+// measured: <video>_motion.csv, yaw per frame as a fraction of the image width;
+// expected: heading rate along the routed trajectory (constant speed between fixes)
+const motion = { t: null, rate: null, fps: 30, scale: null, expT0: 0, expDt: 0.1, expected: null };
+
+async function loadMotion(src) {
+  motion.t = motion.rate = motion.expected = null;
+  motion.scale = null;
+  if (!/^\//.test(src)) { drawMotion(); return; }
+  try {
+    const r = await fetch(src.replace(/\.[^./]+$/, '_motion.csv'));
+    if (!r.ok) throw new Error('none');
+    const lines = (await r.text()).trim().split(/\r?\n/).slice(1);
+    const t = new Float64Array(lines.length), yaw = new Float64Array(lines.length);
+    lines.forEach((l, i) => { const c = l.split(','); t[i] = +c[1]; yaw[i] = c[2] === '' ? NaN : +c[2]; });
+    motion.fps = t.length > 1 ? (t.length - 1) / (t[t.length - 1] - t[0]) : 30;
+    // smoothed rate (image widths per second), moving average over 0.5 s, gaps stay gaps
+    const k = Math.max(1, Math.round(motion.fps / 4)), rate = new Float64Array(yaw.length);
+    for (let i = 0; i < yaw.length; i++) {
+      let sum = 0, n = 0;
+      for (let j = i - k; j <= i + k; j++) if (j >= 0 && j < yaw.length && !isNaN(yaw[j])) { sum += yaw[j]; n++; }
+      rate[i] = n > k ? sum / n * motion.fps : NaN;
+    }
+    motion.t = t; motion.rate = rate;
+    computeExpected();
+  } catch (err) {
+    $('motionInfo').textContent = 'keine Bewegungsdaten (prepare_video.py --cuts-only erzeugt sie)';
+  }
+  drawMotion();
+}
+
+const measuredAt = (t) => {
+  if (!motion.t) return NaN;
+  const i = Math.round(t * motion.fps);
+  return i >= 0 && i < motion.rate.length ? motion.rate[i] : NaN;
+};
+
+function headingRate(t, h = 0.25) {
+  const a = position(t - h), b = position(t + h);
+  if (!a || !b || a.cut || b.cut || a.heading == null || b.heading == null || a.mode === 'linear') return NaN;
+  let d = b.heading - a.heading;
+  if (d > 180) d -= 360; if (d < -180) d += 360;
+  return d / (2 * h);
+}
+
+// expected heading rate on a 10 Hz grid, and the scale image-widths -> degrees fitted over all of it
+function computeExpected() {
+  const fx = state.fixes;
+  motion.expected = null;
+  if (fx.length < 2 || !isFinite(video.duration)) { drawMotion(); return; }
+  const t0 = fx[0].t, t1 = state.ext ? video.duration : fx[fx.length - 1].t;
+  const n = Math.max(0, Math.floor((t1 - t0) / motion.expDt));
+  const exp = new Float64Array(n);
+  for (let i = 0; i < n; i++) exp[i] = headingRate(t0 + i * motion.expDt);
+  motion.expT0 = t0; motion.expected = exp;
+  if (motion.t) {
+    let num = 0, den = 0, cnt = 0;
+    for (let i = 0; i < n; i++) {
+      const e = exp[i], m = measuredAt(t0 + i * motion.expDt);
+      if (isFinite(e) && isFinite(m) && Math.abs(e) < 60) { num += m * e; den += m * m; cnt++; }
+    }
+    motion.scale = cnt > 50 && den > 0 ? num / den : null;
+  }
+  drawMotion();
+}
+
+const expectedAt = (t) => {
+  if (!motion.expected) return NaN;
+  const i = Math.round((t - motion.expT0) / motion.expDt);
+  return i >= 0 && i < motion.expected.length ? motion.expected[i] : NaN;
+};
+
+let motionDrawPending = false;
+function drawMotion() {
+  if (motionDrawPending) return;
+  motionDrawPending = true;
+  requestAnimationFrame(() => { motionDrawPending = false; drawMotionNow(); });
+}
+
+function drawMotionNow() {
+  const cv = $('motion'), dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== W * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const now = video.currentTime || 0, half = parseFloat($('motionWin').value) / 2;
+  const t0 = now - half, t1 = now + half, scale = motion.scale || 67;
+  const xs = (t) => (t - t0) / (t1 - t0) * W;
+  // y range from the data in view
+  let maxv = 20;
+  const step = (t1 - t0) / W;
+  const meas = [], exp = [];
+  for (let x = 0; x <= W; x++) {
+    const t = t0 + x * step, m = measuredAt(t) * scale, e = expectedAt(t);
+    meas.push(m); exp.push(e);
+    if (isFinite(m)) maxv = Math.max(maxv, Math.abs(m)); if (isFinite(e)) maxv = Math.max(maxv, Math.abs(e));
+  }
+  maxv = Math.min(maxv * 1.1, 120);
+  const ys = (v) => H / 2 - v / maxv * (H / 2 - 4);
+  g.strokeStyle = '#ddd'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(0, H / 2); g.lineTo(W, H / 2); g.stroke();
+  g.fillStyle = '#888'; g.font = '10px system-ui';
+  g.fillText(`+${maxv.toFixed(0)} °/s rechts`, 3, 11); g.fillText(`−${maxv.toFixed(0)} °/s links`, 3, H - 3);
+  for (const c of state.cuts) if (c >= t0 && c <= t1) {
+    g.strokeStyle = '#d50000'; g.beginPath(); g.moveTo(xs(c), 0); g.lineTo(xs(c), H); g.stroke();
+  }
+  for (const f of state.fixes) if (f.t >= t0 && f.t <= t1) {
+    g.fillStyle = '#1565c0'; g.fillRect(xs(f.t) - 1, H - 8, 3, 8);
+  }
+  const line = (vals, colour, width) => {
+    g.strokeStyle = colour; g.lineWidth = width; g.beginPath();
+    let pen = false;
+    vals.forEach((v, x) => { if (isFinite(v)) { pen ? g.lineTo(x, ys(v)) : g.moveTo(x, ys(v)); pen = true; } else pen = false; });
+    g.stroke();
+  };
+  line(exp, '#1565c0', 1.5);
+  line(meas, '#ef6c00', 1.5);
+  g.strokeStyle = '#000'; g.lineWidth = 1; g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.stroke();
+  $('motionInfo').textContent = !motion.t ? $('motionInfo').textContent
+    : motion.scale ? `Skalierung ${motion.scale.toFixed(0)}° je Bildbreite (aus den Daten)` : 'Skalierung geschätzt (67°) – mehr Fixpunkte setzen';
+}
+
+$('motion').addEventListener('click', (e) => {
+  const r = $('motion').getBoundingClientRect(), half = parseFloat($('motionWin').value) / 2;
+  video.currentTime = Math.max(0, video.currentTime - half + (e.clientX - r.left) / r.width * 2 * half);
+});
+$('motionWin').onchange = () => { drawMotion(); $('motionWin').blur(); };
+window.addEventListener('resize', drawMotion);
+$('laneMode').onchange = () => { localStorage.setItem('fixpicker:lane', $('laneMode').value); $('laneMode').blur(); scheduleRouting(); };
+$('laneWidth').onchange = () => { localStorage.setItem('fixpicker:laneWidth', $('laneWidth').value); scheduleRouting(); };
+$('laneMode').value = localStorage.getItem('fixpicker:lane') || 'clicks';
+$('laneWidth').value = localStorage.getItem('fixpicker:laneWidth') || '3.25';
 
 // ---------- video ----------
 
@@ -694,6 +859,7 @@ function loadVideo(src, name) {
   state.videoName = name;
   video.src = src;
   loadCuts(src);
+  loadMotion(src);
   $('dropHint').style.display = 'none';
   document.title = `${name} – Fixpunkte`;
   fpsUserSet = false;

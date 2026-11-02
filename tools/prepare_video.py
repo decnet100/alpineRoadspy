@@ -9,6 +9,8 @@ Writes next to the input
                       and signs.py cut their crops from it automatically
     <name>_work_cuts.csv  frames where the video jumps (cuts, e.g. skipped
                       tunnels); --cuts-only finds them for an existing copy
+    <name>_work_motion.csv  camera yaw/pitch/roll per frame from the image
+                      motion (also with --cuts-only; --no-motion skips it)
 Both come from the same decoded frames in one ffmpeg run, so their frame
 numbers match exactly. H.264 because it decodes several times faster than
 VP9/HEVC/AV1 and plays in every browser; a keyframe every second keeps
@@ -25,7 +27,7 @@ from pathlib import Path
 
 import cv2
 
-from videoio import cuts_path, detect_cuts, write_cuts
+from videoio import cuts_path, detect_cuts, estimate_motion, motion_path, read_cuts, write_cuts, write_motion
 
 COMMON_RATES = [Fraction(24000, 1001), Fraction(24), Fraction(25), Fraction(30000, 1001), Fraction(30),
                 Fraction(50), Fraction(60000, 1001), Fraction(60)]
@@ -84,6 +86,16 @@ def find_and_write_cuts(video):
         print("  In the fix picker, set a fix shortly before and after every cut.")
 
 
+def find_and_write_motion(video):
+    """Motion timeline <name>_motion.csv: camera yaw/pitch/roll per frame from the
+    image motion, compared with the road curvature in the fix picker."""
+    print(f"Estimating camera motion in {video.name} ...", flush=True)
+    rows = estimate_motion(video, cuts=read_cuts(video))
+    write_motion(video, rows)
+    ok = sum(1 for r in rows if r[2] is not None)
+    print(f"  {ok} of {len(rows)} frames with motion -> {motion_path(video).name}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("video")
@@ -96,12 +108,15 @@ def main():
     parser.add_argument("--keyframe", type=float, default=1, help="seconds between keyframes (default 1; seeking in the fix picker; longer = smaller files)")
     parser.add_argument("--ffmpeg", help="path to ffmpeg (default: from PATH, FFMPEG variable or winget)")
     parser.add_argument("--cuts-only", action="store_true",
-                        help="only find the cuts of an already prepared video (e.g. videos/samnaun_work.mp4)")
+                        help="only find cuts and camera motion of an already prepared video (e.g. videos/samnaun_work.mp4)")
+    parser.add_argument("--no-motion", action="store_true", help="skip the camera motion timeline")
     args = parser.parse_args()
 
     src = Path(args.video)
     if args.cuts_only:
         find_and_write_cuts(src)
+        if not args.no_motion:
+            find_and_write_motion(src)
         return
     cap = cv2.VideoCapture(str(src))
     width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -144,6 +159,8 @@ def main():
     if len(set(counts)) > 1:
         print("  WARNING: frame counts differ – crops from the full-resolution copy may be off")
     find_and_write_cuts(work)
+    if not args.no_motion:
+        find_and_write_motion(work)
     print(f"Next: python tools/detect.py {work.as_posix()} --step 3")
 
 

@@ -49,6 +49,19 @@ track across them. Cuts the detection missed (soft cross-fades) or detected wron
 can be set or removed in the fix picker with `X` at the current position;
 those edits are kept in `data/cuts/<video>.json` and used by track.py too.
 
+`prepare_video.py` also writes `<name>_work_motion.csv`: camera yaw, pitch
+and roll per frame from the image motion (corners above the bonnet tracked
+into the next frame, rotation + shift fitted robustly). The fix picker shows
+the measured yaw rate together with the heading rate expected from the
+routed road between the fixes (constant speed per section) in a chart below
+the video; the scale image width -> degrees is fitted from the data. A click
+in the chart jumps in the video. On the Samnaun drive both curves agree
+hairpin by hairpin (r = 0.75); the remaining differences – sharper expected
+peaks in hairpins where the car really slows down – are what later steps can
+use to estimate the speed. The camera's lateral position can be taken from
+the clicks or fixed to the right/left lane or the centre (overtaking, closed
+lanes).
+
 ## Reviewing results
 
 ```bash

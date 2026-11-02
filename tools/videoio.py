@@ -135,3 +135,77 @@ def write_cuts(video, cuts):
         w.writerow(["frame", "time_s", "score"])
         for frame, t, score in cuts:
             w.writerow([frame, f"{t:.3f}", score])
+
+
+# ---------- camera motion ----------
+
+def motion_path(video):
+    """<name>_motion.csv next to the video (written by prepare_video.py)."""
+    video = Path(video)
+    return video.with_name(video.stem + "_motion.csv")
+
+
+def estimate_motion(video, width=640, roi=(0.08, 0.68), cuts=(), progress=True):
+    """Camera rotation between consecutive frames from the image motion.
+
+    Corners in the part of the image above the bonnet / dashboard (`roi` as
+    fractions of the height) are tracked into the next frame (Lucas-Kanade);
+    a rotation + shift is fitted robustly (RANSAC), so cars and close objects
+    moving differently do not count. Per frame:
+        yaw   horizontal shift as a fraction of the image width (+ = scene moves
+              left, i.e. the camera turns right); x horizontal field of view
+              = degrees
+        pitch vertical shift as a fraction of the image height
+        roll  image rotation in degrees (+ = clockwise)
+    No values at cuts and where too few points could be tracked (dark tunnels).
+    Returns [(frame, time_s, yaw, pitch, roll, inliers)].
+    """
+    import time
+
+    import numpy as np
+
+    cap = cv2.VideoCapture(str(video))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+    cut_set, out, prev, frame, started = set(cuts), [], None, 0, time.time()
+    while True:
+        ok, img = cap.read()
+        if not ok:
+            break
+        h0, w0 = img.shape[:2]
+        gray = cv2.cvtColor(cv2.resize(img, (width, round(width * h0 / w0)), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
+        h = gray.shape[0]
+        row = (frame, frame / fps, None, None, None, 0)
+        if prev is not None and frame not in cut_set:
+            mask = np.zeros_like(prev)
+            mask[int(roi[0] * h):int(roi[1] * h), :] = 255
+            pts = cv2.goodFeaturesToTrack(prev, maxCorners=300, qualityLevel=0.01, minDistance=8, mask=mask)
+            if pts is not None and len(pts) >= 12:
+                nxt, st, _ = cv2.calcOpticalFlowPyrLK(prev, gray, pts, None, winSize=(21, 21), maxLevel=3)
+                good = st.ravel() == 1
+                if good.sum() >= 12:
+                    m, inl = cv2.estimateAffinePartial2D(pts[good], nxt[good], method=cv2.RANSAC, ransacReprojThreshold=2.0)
+                    if m is not None and inl is not None and inl.sum() >= 10:
+                        # rotation about the image centre: shift of the centre point
+                        cx, cy = width / 2, h / 2
+                        dx = m[0, 0] * cx + m[0, 1] * cy + m[0, 2] - cx
+                        dy = m[1, 0] * cx + m[1, 1] * cy + m[1, 2] - cy
+                        roll = float(np.degrees(np.arctan2(m[1, 0], m[0, 0])))
+                        row = (frame, frame / fps, -dx / width, dy / h, roll, int(inl.sum()))
+        out.append(row)
+        prev = gray
+        frame += 1
+        if progress and frame % 3000 == 0:
+            print(f"  motion: {frame}/{total} frames, {time.time() - started:.0f} s", flush=True)
+    return out
+
+
+def write_motion(video, rows):
+    import csv
+
+    with open(motion_path(video), "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "time_s", "yaw", "pitch", "roll_deg", "inliers"])
+        for frame, t, yaw, pitch, roll, n in rows:
+            fmt = lambda v, d: "" if v is None else f"{v:.{d}f}"
+            w.writerow([frame, f"{t:.3f}", fmt(yaw, 5), fmt(pitch, 5), fmt(roll, 3), n])
