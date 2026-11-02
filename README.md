@@ -84,9 +84,8 @@ engine-sound speed next to the trajectory's, and the cockpit parts found are
 outlined over the video (red where uncertain) with the lean angle.
 Cross-validated on the Samnaun 2 ride by leaving out fixes, with the
 engine-sound gears fitted without them: position error at a left-out fix
-(fixes every ~20-40 s) median 25 m -> 5 m (90 %: 75 -> 27 m); with three
-fixes left out 34 -> 13 m (90 % hardly better: 124 -> 116 m, mostly
-stretches with a wrong gear).
+(fixes every ~20-40 s) median 25 m -> 5 m (90 %: 75 -> 22 m); with three
+fixes left out 34 -> 13 m (90 %: 124 -> 43 m).
 
 ## Speed from the engine sound
 
@@ -104,23 +103,25 @@ speed falls at the same time) and coasting with closed throttle.
 
 The speed is k_gear x f0 with one constant per gear. With the fixes
 (`--fixes`, the fix picker's CSV export) the gears are fitted without any
-speed reading: they form a ladder with the step measured at the upshifts, the
-gear per moment follows the mean speed of its fix interval and changes only
-at detected shift jumps, and the base constant is chosen so that the
+speed reading: they form a ladder with the step measured at the upshifts
+(six gears around the typical one); the gear per moment is chosen so that
+the speed stays continuous – a pitch jump by the gear step forces a gear
+change at that moment, a gear change without one is expensive – and close to
+the mean speed of its fix interval; the base constant is chosen so that the
 integrated speed matches the distances along the route between the fixes.
-Alternatively `--readings` (CSV `time_s,speed_kmh`, e.g. read off the
-speedometer; `--lag` for its delay, 0.7 s) fits the gears from readings; the
-gear between two steady segments must then change by the number of shifts
-found in the gap, otherwise the gap is flagged. Results in
-`data/audio/<video>/` (`track.csv`, `segments.csv`, `events.csv`,
-`gears.csv`, `plot.png`); the fix picker loads `track.csv` automatically.
+Stretches tracked at twice the pitch (slow hairpins) are halved, short pitch
+and speed outliers bridged; speed jumps that are left (more than 8 km/h in
+0.5 s) are reported. Alternatively `--readings` (CSV `time_s,speed_kmh`,
+e.g. read off the speedometer; `--lag` for its delay, 0.7 s) fits the gears
+from readings. Results in `data/audio/<video>/` (`track.csv`,
+`segments.csv`, `events.csv`, `gears.csv`, `plot.png`); the fix picker
+loads `track.csv` automatically.
 
 On the first 6½ minutes of the Samnaun 2 ride (Triumph Tiger 1050) the step
-is 0.778 and the speed from the fixes agrees with 39 speedometer readings
-(corrected by the speedometer's 6 % over-reading) within median 3.3 km/h;
-the first 16 s, around the first fix, got the gear below (up to 15 km/h
-off). Where the gear changes unnoticed inside a long fix interval, a stretch
-can get the neighbouring gear – it is a speed reference, not a measurement.
+is 0.784 and the speed from the fixes agrees with 39 speedometer readings
+(corrected by the speedometer's 6 % over-reading) within median 0.7 km/h,
+90 % 2 km/h, max 4.4 km/h. Left: one shift in a long tunnel that the fixes
+around it do not support (reported as a jump).
 
 ## Helmet cameras: cockpit and lean angle
 

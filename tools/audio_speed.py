@@ -254,50 +254,118 @@ def read_fixes(path):
                       if r.get("station_m") not in (None, ""))
 
 
-def gear_path(f0, ks, vref, allowed, sigma=0.25, switch=60.0):
-    """Gear index per frame (Viterbi): speed ks[g] * f0 close to the reference speed vref
-    (NaN = no reference); the gear changes by one only at a shift jump (`allowed`).
-    Leaving changes elsewhere possible fits the fixes better but predicts positions
-    between them worse (cross-validation on the Samnaun 2 ride).
-    Restricting the direction (up only at upshifts) was tried: downshifts while braking
-    are often not detected, and the cross-validation got no better."""
-    n, g_count = len(f0), len(ks)
-    em = np.zeros((n, g_count))
-    m = ~np.isnan(vref)
-    em[m] = ((np.log(ks)[None, :] + np.log(f0[m])[:, None] - np.log(vref[m])[:, None]) / sigma) ** 2
-    em = em.tolist()
-    cost, back = list(em[0]), np.zeros((n, g_count), np.int8)
-    for i in range(1, n):
-        sw = switch if allowed[i] else float("inf")
-        row, new = em[i], [0.0] * g_count
-        for g in range(g_count):
-            best, bg = cost[g], g
-            if g > 0 and cost[g - 1] + sw < best:
-                best, bg = cost[g - 1] + sw, g - 1
-            if g < g_count - 1 and cost[g + 1] + sw < best:
-                best, bg = cost[g + 1] + sw, g + 1
-            new[g] = best + row[g]
-            back[i, g] = bg
-        cost = new
-    path = np.zeros(n, int)
-    path[-1] = int(np.argmin(cost))
-    for i in range(n - 1, 0, -1):
-        path[i - 1] = back[i, path[i]]
+def fix_octaves(t, f0, max_len_s=15.0):
+    """Stretches tracked at twice (or half) the pitch: entered and left by big jumps in
+    opposite directions (beyond 1.5x, more than a gear step), shorter than max_len_s,
+    and at 1.7-2.4x (or the inverse) the pitch around them - corrected by the factor 2.
+    Happens in slow hairpins, where the fundamental is weak."""
+    lf = np.log(f0).copy()
+    w = JUMP_WINDOW
+    d = np.zeros(len(lf))
+    d[w:] = lf[w:] - lf[:-w]
+    big = np.flatnonzero(np.abs(d) > np.log(1.5))
+    # one index per jump (the steepest of a run)
+    jumps = []
+    for i in big:
+        if jumps and i - jumps[-1] <= w:
+            if abs(d[i]) > abs(d[jumps[-1]]):
+                jumps[-1] = i
+        else:
+            jumps.append(i)
+    dt = t[1] - t[0]
+    out = f0.copy()
+    used = -1
+    for a_i, a in enumerate(jumps):
+        if a <= used:
+            continue
+        for b in jumps[a_i + 1:]:
+            if (b - a) * dt > max_len_s:
+                break
+            if np.sign(d[a]) == np.sign(d[b]):
+                continue
+            inside = np.median(lf[a:b - w + 1]) if b - w + 1 > a else lf[a]
+            around = np.median(np.r_[lf[max(0, a - w - int(2 / dt)):a - w + 1], lf[b:b + int(2 / dt)]])
+            r = inside - around
+            if np.log(1.7) <= abs(r) <= np.log(2.4):
+                out[a - w + 1:b - w + 1] = f0[a - w + 1:b - w + 1] / (2.0 if r > 0 else 0.5)
+                used = b
+            break
+    return out
+
+
+def pitch_glitches(t, f0, ratio=1.35, window_s=3.0):
+    """Frames where the tracked pitch is off its surroundings (median over window_s) by more
+    than `ratio` - beyond a gear step, so a tracking error (other harmonic, slow hairpins)."""
+    from scipy.ndimage import median_filter
+
+    n = max(3, int(window_s / (t[1] - t[0])) | 1)
+    ref = median_filter(np.log(f0), n, mode="nearest")
+    return np.abs(np.log(f0) - ref) > np.log(ratio)
+
+
+def gear_path(f0, ks, vref, valid, sigma=0.35, smooth=0.01, change=5.0):
+    """Gear index per frame (Viterbi). Two terms:
+    - the speed ks[g] * f0 should be close to the reference speed vref (NaN = none),
+      relative deviation sigma;
+    - the speed is continuous: from one frame (50 ms) to the next it changes by a
+      relative `smooth` at most typically, so a pitch jump by the gear step forces the
+      gear change at that very moment and a gear change without one is expensive.
+    Frames not `valid` (pitch glitches) are bridged; they get the gear before them."""
+    idx = np.flatnonzero(valid)
+    lk, lf = np.log(ks), np.log(f0[idx])
+    em = np.zeros((len(idx), len(ks)))
+    m = ~np.isnan(vref[idx])
+    em[m] = ((lk[None, :] + lf[m, None] - np.log(vref[idx][m])[:, None]) / sigma) ** 2
+    g_count = len(ks)
+    cost, back = em[0].copy(), np.zeros((len(idx), g_count), np.int8)
+    dk = lk[None, :] - lk[:, None]                     # from gear a (row) to gear b (column)
+    jump_cost = np.where(np.abs(np.arange(g_count)[:, None] - np.arange(g_count)[None, :]) > 1, np.inf,
+                         change * (np.arange(g_count)[:, None] != np.arange(g_count)[None, :]))
+    for i in range(1, len(idx)):
+        trans = ((dk + (lf[i] - lf[i - 1])) / smooth) ** 2 + jump_cost
+        total = cost[:, None] + trans
+        back[i] = np.argmin(total, axis=0)
+        cost = total[back[i], np.arange(g_count)] + em[i]
+    path_v = np.zeros(len(idx), int)
+    path_v[-1] = int(np.argmin(cost))
+    for i in range(len(idx) - 1, 0, -1):
+        path_v[i - 1] = back[i, path_v[i]]
+    path = np.zeros(len(f0), int)
+    path[idx] = path_v
+    for i in range(1, len(f0)):
+        if not valid[i]:
+            path[i] = path[i - 1]
+    if not valid[0]:
+        path[:idx[0]] = path_v[0]
     return path
 
 
-def fit_from_fixes(t, f0, events, fixes, step, gears=4):
+def speed_from_path(t, f0, ks, path, valid, ratio=1.15, window_s=2.0):
+    """Speed per frame. Across pitch glitches, and where the speed is off its surroundings
+    (median over window_s) by more than `ratio` - faster than a motorcycle accelerates or
+    brakes for that short - it is interpolated linearly."""
+    from scipy.ndimage import median_filter
+
+    v = np.asarray(ks)[path] * f0
+    n = max(3, int(window_s / (t[1] - t[0])) | 1)
+    ok = valid.copy()
+    for _ in range(2):
+        ref = median_filter(v, n, mode="nearest")
+        ok &= np.abs(np.log(v / ref)) <= np.log(ratio)
+        v = np.where(ok, v, np.interp(t, t[ok], v[ok]))
+    return v
+
+
+def fit_from_fixes(t, f0, events, fixes, step, gears=6):
     """Gear constants from the distances between fixes, without speed readings.
 
     The gears form a ladder k0 / step^g (step from the upshift jumps); the gear per
     frame follows the mean speed of its fix interval and may change only at shift
-    jumps; k0 is chosen so that the integrated speed best matches the distances
+    pitch jumps (continuity of the speed, see gear_path); k0 is chosen so that the integrated speed best matches the distances
     along the route between the fixes. Returns (constants, gear per frame,
     distance errors in m per fix interval).
     On the Samnaun 2 ride the speed agrees with the speedometer (corrected by its 6 %
-    over-reading) within median 3.3 km/h. Where the gear changes unnoticed inside a
-    long fix interval, a stretch can get the neighbouring gear (speed off by the
-    gear step), so this is a speed reference, not a measurement."""
+    over-reading) within median 0.7 km/h, 90 % 2 km/h."""
     dt = t[1] - t[0]
     pairs = [(a, b, sa, sb) for (a, sa), (b, sb) in zip(fixes, fixes[1:]) if a >= t[0] and b <= t[-1] and b > a]
     if not pairs:
@@ -305,31 +373,30 @@ def fit_from_fixes(t, f0, events, fixes, step, gears=4):
     vref = np.full(len(t), np.nan)
     for a, b, sa, sb in pairs:
         vref[(t >= a) & (t < b)] = (sb - sa) / (b - a) * 3.6
-    allowed = np.zeros(len(t), bool)
-    for kind, x, _ in events:
-        if kind in ("up", "down", "down-braking"):
-            allowed[np.abs(t - x) < 0.7] = True
+    valid = ~pitch_glitches(t, f0)
     inside = ~np.isnan(vref) & (vref > 3)
     k_mid = float(np.median(vref[inside] / f0[inside]))
-    ladder = step ** -np.arange(gears)
+    # ladder around the typical gear: two gears below it, the rest above (helmet videos on
+    # mountain roads: mostly 2nd/3rd, shifts up on straights and in tunnels)
+    ladder = step ** -(np.arange(gears) - 2)
 
     def error(k0):
         ks = k0 * ladder
-        path = gear_path(f0, ks, vref, allowed)
-        v = ks[path] * f0
+        path = gear_path(f0, ks, vref, valid)
+        v = speed_from_path(t, f0, ks, path, valid)
         e = [v[(t >= a) & (t < b)].sum() * dt / 3.6 - (sb - sa) for a, b, sa, sb in pairs]
         return float(np.sum(np.abs(e))), ks, path, e
 
-    grid = k_mid * np.exp(np.arange(np.log(step ** (gears - 1) * 0.8), np.log(1.25), 0.02))
+    grid = k_mid * np.exp(np.arange(np.log(step) * 0.6, -np.log(step) * 0.6, 0.02))
     best = min((error(k) for k in grid), key=lambda r: r[0])
-    k_best = best[1][0]
+    k_best = best[1][2]
     for k in k_best * np.exp(np.arange(-0.02, 0.0201, 0.004)):
         r = error(k)
         if r[0] < best[0]:
             best = r
     _, ks, path, e = best
     used = sorted(set(path.tolist()))
-    return [float(k) for k in ks], path, e, used
+    return [float(k) for k in ks], path, e, used, valid
 
 
 def main():
@@ -366,6 +433,7 @@ def main():
     t = t + start
     print(f"  {len(audio) / RATE:.0f} s, {len(t)} frames; tracking pitch ...", flush=True)
     f0, conf = track_pitch(spec, freqs, args.rpm[0] * hz_per_rpm, args.rpm[1] * hz_per_rpm)
+    f0 = fix_octaves(t, f0)
     load = engine_load(spec, freqs, f0)
     segs = steady_segments(t, f0, load, args.min_drive_rpm * hz_per_rpm)
 
@@ -376,7 +444,7 @@ def main():
         ups = [r for k, _, r in events if k == "up"]
         fstep = float(np.median(ups)) if len(ups) >= 2 else args.gear_step
         events = find_events(t, f0, load, 0, len(t) - 1, fstep)
-        consts, frame_gear, errors, used = fit_from_fixes(t, f0, events, read_fixes(args.fixes), fstep)
+        consts, frame_gear, errors, used, valid = fit_from_fixes(t, f0, events, read_fixes(args.fixes), fstep)
         print(f"  gear step {fstep:.3f} from {len(ups)} upshifts; distance error between fixes: "
               f"median {np.median(np.abs(errors)):.0f} m, max {np.max(np.abs(errors)):.0f} m")
         for s_, (i, j) in enumerate(segs):
@@ -398,12 +466,23 @@ def main():
     name = lambda g: "" if g is None else str(g + args.first_gear)
     speed = np.full(len(t), np.nan)
     if frame_gear is not None:        # every frame has a gear
-        speed = np.array(consts)[frame_gear] * f0
+        speed = speed_from_path(t, f0, consts, frame_gear, valid)
     else:
         for s, (i, j) in enumerate(segs):
             if 0 <= gear.get(s, -1) < len(consts):
                 speed[i:j + 1] = consts[gear[s]] * f0[i:j + 1]
 
+    if frame_gear is not None:
+        w_ = JUMP_WINDOW * 2                      # 0.5 s
+        dv = np.zeros(len(t))
+        dv[w_:] = speed[w_:] - speed[:-w_]
+        odd = []
+        for i in range(w_, len(t)):
+            if abs(dv[i]) > 8 and abs(dv[i]) >= np.abs(dv[max(0, i - w_):i + w_]).max() and (not odd or t[i] - odd[-1] > 0.5):
+                odd.append(float(t[i]))
+        if odd:
+            print(f"  implausible speed jumps (> 8 km/h in 0.5 s) left at {', '.join(f'{x:.1f}' for x in odd)} s - "
+                  "check there (tunnel echo, undetected shift)")
     with open(out / "track.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["time_s", "f0_hz", "rpm", "load", "confidence", "segment", "gear", "speed_kmh"])

@@ -529,7 +529,7 @@ function applyLaneMode(routes, fixes) {
 // lean and engine-sound speed (degrees directly, no scale) - and/or the engine-sound speed
 // as reference. Needs a routed section without a cut.
 // Cross-validated on the Samnaun 2 ride (helmet camera, fixes every ~20-40 s): position error
-// at left-out fixes median 25 -> 5 m with lean + sound (90 %: 75 -> 27 m).
+// at left-out fixes median 25 -> 5 m with lean + sound (90 %: 75 -> 22 m).
 function fitTimings(routes, fixes) {
   routes.forEach((r) => { delete r.timing; delete r.timingMode; });
   const curves = $('speedFromCurves').checked, source = $('turnSource').value;
