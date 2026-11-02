@@ -47,6 +47,7 @@ from detect import parse_time
 
 WIDTH = 960           # processing width
 ANGLES = range(-15, 16, 3)
+RADIUS = 40          # px at processing width: search radius around the previous position
 
 
 def cockpit_path(video):
@@ -121,26 +122,65 @@ class Cockpit:
             tg = cv2.warpAffine(self.ref * (self.mask > 0), rot, size)[self.y0:self.y1, self.x0:self.x1]
             tm = cv2.warpAffine(self.mask, rot, size, flags=cv2.INTER_NEAREST)[self.y0:self.y1, self.x0:self.x1]
             self.templates.append((a, tg, tm))
+        self.last = None
+        self.ref_crop = np.ascontiguousarray(self.ref[self.y0:self.y1, self.x0:self.x1])
+        self.mask_crop = np.ascontiguousarray(self.mask[self.y0:self.y1, self.x0:self.x1])
+
+    def search(self, padded, angles, window=None):
+        """Best (score, angle, top-left of the template in `padded`) over the given angles,
+        within window = (x0, y0, x1, y1) of top-left positions if given."""
+        best = None
+        for a, tg, tm in self.templates:
+            if a not in angles:
+                continue
+            img, ox, oy = padded, 0, 0
+            if window:
+                x0, y0, x1, y1 = window
+                ox, oy = max(0, x0), max(0, y0)
+                img = padded[oy:min(padded.shape[0], y1 + tg.shape[0]), ox:min(padded.shape[1], x1 + tg.shape[1])]
+                if img.shape[0] < tg.shape[0] or img.shape[1] < tg.shape[1]:
+                    continue
+            res = cv2.matchTemplate(img, tg, cv2.TM_CCORR_NORMED, mask=tm)
+            res[~np.isfinite(res)] = 0
+            _, score, _, loc = cv2.minMaxLoc(res)
+            if best is None or score > best[0]:
+                best = (score, a, (loc[0] + ox, loc[1] + oy))
+        return best
 
     def locate(self, small):
-        """(2x3 transform reference -> frame at processing scale, match score)."""
+        """(2x3 transform reference -> frame at processing scale, match score).
+        Searches near the previous result first (position +-RADIUS, angle +-3 degrees)
+        and the whole image at all angles only if that match is clearly worse."""
         grad = gradient(small)
         p = self.pad
         padded = cv2.copyMakeBorder(grad, p, p, p, p, cv2.BORDER_CONSTANT, value=0)
         best = None
-        for a, tg, tm in self.templates:
-            res = cv2.matchTemplate(padded, tg, cv2.TM_CCORR_NORMED, mask=tm)
-            res[~np.isfinite(res)] = 0
-            _, score, _, loc = cv2.minMaxLoc(res)
-            if best is None or score > best[0]:
-                best = (score, a, loc)
+        if self.last:
+            score0, a0, (lx0, ly0) = self.last
+            best = self.search(padded, [a for a in ANGLES if abs(a - a0) <= 3],
+                               (lx0 - RADIUS, ly0 - RADIUS, lx0 + RADIUS, ly0 + RADIUS))
+            if best and best[0] < max(0.75, score0 - 0.05):
+                best = None
+        if best is None:
+            best = self.search(padded, list(ANGLES))
+        self.last = best
         score, a, (lx, ly) = best
         warp = cv2.getRotationMatrix2D(self.centre, a, 1.0).astype(np.float32)
         warp[0, 2] += lx - p - self.x0
         warp[1, 2] += ly - p - self.y0
+        # refine on the cockpit area of the reference only (the warp then starts at its corner)
+        corner = np.array([self.x0, self.y0], np.float32)
+        start = warp.copy()
+        start[:, 2] += warp[:, :2] @ corner
         try:
             crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 60, 1e-5)
-            _, fine = cv2.findTransformECC(self.ref, grad, warp.copy(), cv2.MOTION_EUCLIDEAN, crit, self.mask, 5)
+            if hasattr(cv2, "findTransformECCWithMask"):   # OpenCV >= 5: mask in reference coordinates
+                valid = np.full(grad.shape, 255, np.uint8)
+                _, fine = cv2.findTransformECCWithMask(self.ref_crop, grad, self.mask_crop, valid, start,
+                                                       cv2.MOTION_EUCLIDEAN, crit, 5)
+            else:                                            # older OpenCV: the mask would apply to the frame
+                _, fine = cv2.findTransformECC(self.ref_crop, grad, start, cv2.MOTION_EUCLIDEAN, crit, None, 5)
+            fine[:, 2] -= fine[:, :2] @ corner
             if abs(fine[0, 2] - warp[0, 2]) < 15 and abs(fine[1, 2] - warp[1, 2]) < 15:
                 warp = fine
         except cv2.error:

@@ -131,7 +131,8 @@ scatters by about ±9 km/h, far more than the engine sound; the lean is more
 useful for timing curves. Subtracting the head's turning (from the cockpit's
 sideways shift) did not improve the comparison of camera turning with the
 road – leaning and head movements also shift the near cockpit – so it is not
-applied. About 3 s per video second on a CPU for 4K input.
+applied. About 0.5 s per video second on a CPU for 4K input (the search
+stays near the previous position; no GPU needed).
 
 ## Reviewing results
 
