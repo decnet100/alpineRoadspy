@@ -399,6 +399,146 @@ def match_distances(t, f0, ks, valid, pairs, path, iters=40, rate=0.5, sigma=1.0
     return best_path, list(best_e)
 
 
+def resolve_unclear(t, f0, ks, path, speed, pairs, segs, events=(), sigma_m=7.0, max_clutch_s=3.0,
+                    brake=8.0, accel=5.0):
+    """Stretches between sure parts, filled so that each fix interval's distance is met.
+
+    Sure: steady segments with one gear. In a fix interval of 10 s or more, the sure
+    stretches and the plain unclear ones (same gear before and after, no jump) are
+    summed up; the rest of the distance has to come from the unclear stretches with a
+    gear change or a speed jump. Their gear and speed at both ends are known (from the
+    sure neighbours); within, the sound is followed with the gear before, then ignored
+    for a while (clutch pulled - the speed is joined smoothly, at most `brake`/`accel`
+    m/s^2), then followed with the gear after. Time and length of that window are
+    searched so that the interval's distance is met (within sigma_m), preferring short
+    windows. Where the throttle was closed in the stretch (coasting: clutch possibly
+    pulled, shifts hidden), the gear after it is open too (-2..+1), for the following
+    sure part up to its next gear change. The stretches of an interval are combined by
+    dynamic programming over the distance (1 m steps). Returns (speed, gear, clutch mask,
+    notes). On the Samnaun 2 ride this finds the downshift hidden while braking in a
+    tunnel (0.6 s clutch); speed vs. 63 speedometer readings (corrected by its 6 %
+    over-reading) median 0.8, 90 % 4.9, max 11.5 km/h."""
+    dt = t[1] - t[0]
+    ks = np.asarray(ks)
+    speed, path = speed.copy(), path.copy()
+    clutch = np.zeros(len(t), bool)
+    sure = np.zeros(len(t), bool)
+    for i, j in segs:
+        if len(set(path[i:j + 1].tolist())) == 1:
+            sure[i:j + 1] = True
+    notes = []
+    w = int(0.5 / dt)
+    coast = np.zeros(len(t), bool)
+    for kind, x, length in events:
+        if kind == "coast":
+            coast[(t >= x) & (t <= x + length)] = True
+    for a, b, sa, sb in pairs:
+        if b - a < 10:
+            continue
+        idx = np.flatnonzero((t >= a) & (t < b))
+        if len(idx) < 3:
+            continue
+        lo, hi = idx[0], idx[-1] + 1
+        runs, i = [], lo
+        while i < hi:
+            if sure[i]:
+                i += 1
+                continue
+            j = i
+            while j < hi and not sure[j]:
+                j += 1
+            runs.append((i, j))
+            i = j
+        open_runs = []
+        for i0, i1 in runs:
+            if i0 == lo or i1 == hi:          # touching the interval's end: no sure neighbour inside
+                continue
+            g_in, g_out = path[i0 - 1], path[i1]
+            jump = np.abs(speed[i0 + w:i1] - speed[i0:i1 - w]).max() > 8 if i1 - i0 > w else False
+            hidden = coast[i0:i1].any()
+            if g_in != g_out or jump or hidden:
+                # the sure part after it, up to its next gear change, follows the gear chosen here
+                k = i1
+                while k < hi and path[k] == path[i1]:
+                    k += 1
+                deltas = (-2, -1, 0, 1) if hidden and not (k == hi and hi < len(t) and path[hi] == path[hi - 1]) else (0,)
+                open_runs.append((i0, i1, g_in, g_out, k, deltas))
+        if not open_runs:
+            continue
+        # blocks must not overlap the next open stretch
+        open_runs = [(i0, i1, gi, go, min(k, open_runs[n + 1][0]) if n + 1 < len(open_runs) else k, dl)
+                     for n, (i0, i1, gi, go, k, dl) in enumerate(open_runs)]
+        fixed = speed[lo:hi].sum() * dt / 3.6 - sum(speed[i0:k].sum() * dt / 3.6 for i0, _, _, _, k, _ in open_runs)
+        rest = (sb - sa) - fixed
+        # candidates per open stretch: (distance, clutch length, start, end, speed array, gear after)
+        options = []
+        for i0, i1, g_in, g_out0, k_end, deltas in open_runs:
+            cands = []
+            n = i1 - i0
+            step_f = max(1, int(0.2 / dt))
+            for d_g in deltas:
+              g_out = g_out0 + d_g
+              if not 0 <= g_out < len(ks):
+                  continue
+              block = ks[g_out] * f0[i1:k_end]
+              for start in range(0, n + 1, step_f):
+                  for length in range(0, int(max_clutch_s / dt) + 1, step_f):
+                      end = start + length
+                      if end > n:
+                          break
+                      v = np.empty(n)
+                      v[:start] = ks[g_in] * f0[i0:i0 + start]
+                      v[end:] = ks[g_out] * f0[i0 + end:i1]
+                      v_before = ks[g_in] * f0[i0 + start - 1] if start > 0 else speed[i0 - 1]
+                      v_after = ks[g_out] * f0[i0 + end] if end < n else (block[0] if len(block) else speed[i1])
+                      if length == 0:
+                          if abs(np.log(v_after / v_before)) > 0.06:     # a shift without clutch time keeps the speed
+                              continue
+                      else:
+                          a_ms = (v_after - v_before) / 3.6 / (length * dt)
+                          if a_ms < -brake or a_ms > accel:
+                              continue
+                          v[start:end] = v_before + (v_after - v_before) * (np.arange(1, length + 1) / (length + 1))
+                      # ends must join the sure neighbours
+                      nxt = block[0] if len(block) else speed[i1]
+                      if abs(np.log(v[0] / speed[i0 - 1])) > 0.08 or abs(np.log(v[-1] / nxt)) > 0.08:
+                          continue
+                      cands.append(((v.sum() + block.sum()) * dt / 3.6, length * dt + 0.5 * abs(d_g), start, end,
+                                    np.r_[v, block], g_out))
+            if not cands:
+                cands = [(speed[i0:k_end].sum() * dt / 3.6, 0.0, 0, 0, speed[i0:k_end].copy(), g_out0)]
+            # per whole metre keep only the cheapest candidate
+            by_m = {}
+            for cand in cands:
+                m_ = int(round(cand[0]))
+                if m_ not in by_m or cand[1] < by_m[m_][1]:
+                    by_m[m_] = cand
+            options.append(list(by_m.values()))
+        # combine (one option per stretch): distance close to the rest, little clutch time -
+        # dynamic programming over the distance in 1 m steps
+        states = {0: (0.0, [])}                          # metres so far -> (cost, choices)
+        for cands in options:
+            nxt = {}
+            for m0, (c0, ch) in states.items():
+                for n_c, cand in enumerate(cands):
+                    m1 = m0 + int(round(cand[0]))
+                    c1 = c0 + cand[1]
+                    if m1 not in nxt or c1 < nxt[m1][0]:
+                        nxt[m1] = (c1, ch + [n_c])
+            states = nxt
+        if not states:
+            continue
+        m_best = min(states, key=lambda m_: ((m_ - rest) / sigma_m) ** 2 + 0.5 * states[m_][0])
+        best = (None, [options[n][c] for n, c in enumerate(states[m_best][1])])
+        for (i0, i1, g_in, _, k_end, _), (d, cost, start, end, v, g_out) in zip(open_runs, best[1]):
+            speed[i0:k_end] = v
+            path[i0:i0 + start] = g_in
+            path[i0 + start:k_end] = g_out
+            clutch[i0 + start:i0 + end] = True
+            notes.append((float(t[i0]), float(t[i1]), int(g_in), int(g_out), float(t[i0 + start]), (end - start) * dt))
+    return speed, path, clutch, notes
+
+
 def fit_from_fixes(t, f0, events, fixes, step, gears=6):
     """Gear constants from the distances between fixes, without speed readings.
 
@@ -407,9 +547,7 @@ def fit_from_fixes(t, f0, events, fixes, step, gears=6):
     pitch jumps (continuity of the speed, see gear_path); k0 is chosen so that the integrated speed best matches the distances
     along the route between the fixes. Returns (constants, gear per frame,
     distance errors in m per fix interval).
-    On the Samnaun 2 ride the speed agrees with 63 speedometer readings (corrected by its
-    6 % over-reading) within median 0.8 km/h, 90 % 5.5 km/h; worst in a tunnel while
-    braking with hidden downshifts (one gear too high, up to 29 km/h)."""
+    See resolve_unclear for stretches where the sound alone does not tell the gear."""
     dt = t[1] - t[0]
     pairs = [(a, b, sa, sb) for (a, sa), (b, sb) in zip(fixes, fixes[1:]) if a >= t[0] and b <= t[-1] and b > a]
     if not pairs:
@@ -482,16 +620,23 @@ def main():
     load = engine_load(spec, freqs, f0)
     segs = steady_segments(t, f0, load, args.min_drive_rpm * hz_per_rpm)
 
-    consts, gear, frame_gear = [], {}, None
+    consts, gear, frame_gear, clutch = [], {}, None, None
     readings = read_readings(args.readings) if args.readings else []
     if args.fixes:
         events = find_events(t, f0, load, 0, len(t) - 1, args.gear_step)
         ups = [r for k, _, r in events if k == "up"]
         fstep = float(np.median(ups)) if len(ups) >= 2 else args.gear_step
         events = find_events(t, f0, load, 0, len(t) - 1, fstep)
-        consts, frame_gear, errors, used, valid = fit_from_fixes(t, f0, events, read_fixes(args.fixes), fstep)
+        fixes = read_fixes(args.fixes)
+        consts, frame_gear, errors, used, valid = fit_from_fixes(t, f0, events, fixes, fstep)
         print(f"  gear step {fstep:.3f} from {len(ups)} upshifts; distance error between fixes: "
               f"median {np.median(np.abs(errors)):.0f} m, max {np.max(np.abs(errors)):.0f} m")
+        pairs = [(a, b, sa, sb) for (a, sa), (b, sb) in zip(fixes, fixes[1:]) if a >= t[0] and b <= t[-1] and b > a]
+        resolved = resolve_unclear(t, f0, consts, frame_gear, speed_from_path(t, f0, consts, frame_gear, valid), pairs, segs, events)
+        speed_fixed, frame_gear, clutch, notes = resolved
+        for a_, b_, gi, go, at_, ln in notes:
+            print(f"  {a_:6.1f}-{b_:6.1f} s: gear {gi + args.first_gear} -> {go + args.first_gear}, "
+                  f"sound ignored {ln:.1f} s from {at_:.1f} s (clutch)")
         for s_, (i, j) in enumerate(segs):
             vals = frame_gear[i:j + 1]
             gear[s_] = int(np.bincount(vals).argmax())
@@ -511,7 +656,7 @@ def main():
     name = lambda g: "" if g is None else str(g + args.first_gear)
     speed = np.full(len(t), np.nan)
     if frame_gear is not None:        # every frame has a gear
-        speed = speed_from_path(t, f0, consts, frame_gear, valid)
+        speed = speed_fixed
     else:
         for s, (i, j) in enumerate(segs):
             if 0 <= gear.get(s, -1) < len(consts):
@@ -530,13 +675,14 @@ def main():
                   "check there (tunnel echo, undetected shift)")
     with open(out / "track.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["time_s", "f0_hz", "rpm", "load", "confidence", "segment", "gear", "speed_kmh"])
+        w.writerow(["time_s", "f0_hz", "rpm", "load", "confidence", "segment", "gear", "speed_kmh", "clutch"])
         for n in range(len(t)):
             s = int(seg_of[n])
             w.writerow([f"{t[n]:.2f}", f"{f0[n]:.2f}", round(f0[n] / hz_per_rpm), f"{load[n]:.3f}", f"{conf[n]:.2f}",
                         s if s >= 0 else "",
                         name(int(frame_gear[n])) if frame_gear is not None else name(gear.get(s)) if s >= 0 else "",
-                        "" if np.isnan(speed[n]) else f"{speed[n]:.1f}"])
+                        "" if np.isnan(speed[n]) else f"{speed[n]:.1f}",
+                        "" if clutch is None else int(clutch[n])])
     with open(out / "segments.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["segment", "start_s", "end_s", "f0_mean_hz", "rpm_mean", "f0_slope_hz_s", "load", "gear", "speed_mean_kmh"])

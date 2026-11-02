@@ -85,7 +85,7 @@ outlined over the video (red where uncertain) with the lean angle.
 Cross-validated on the Samnaun 2 ride by leaving out fixes, with the
 engine-sound gears fitted without them: position error at a left-out fix
 (fixes every ~20-40 s) median 25 m -> 5 m (90 %: 75 -> 22 m); with three
-fixes left out 34 -> 10 m (90 %: 124 -> 43 m).
+fixes left out 34 -> 10 m (90 %: 124 -> 22 m).
 
 ## Speed from the engine sound
 
@@ -119,12 +119,22 @@ from readings. Results in `data/audio/<video>/` (`track.csv`,
 `segments.csv`, `events.csv`, `gears.csv`, `plot.png`); the fix picker
 loads `track.csv` automatically.
 
+Where the sound alone does not tell the gear – shifts with the clutch pulled
+while braking leave no jump – the fixes decide: within each fix interval the
+sure stretches (steady segments) are summed up, and the rest of the distance
+has to come from the unclear stretches between them. Their gear and speed at
+both ends are known; within, the sound is followed with the gear before, then
+ignored for a while (clutch pulled; the speed joined smoothly within
+plausible braking/acceleration), then followed with the gear after – after a
+coasting phase that gear is open too, for the sure stretch that follows.
+Time and length of the clutch window and the gear are chosen so that the
+interval's distance is met (column `clutch` in `track.csv`).
+
 On the first 6½ minutes of the Samnaun 2 ride (Triumph Tiger 1050) the step
 is 0.784 and the speed from the fixes agrees with 63 speedometer readings
 (corrected by the speedometer's 6 % over-reading) within median 0.8 km/h,
-90 % 5.5 km/h. Worst: braking in a tunnel, where the downshifts happen with
-the clutch pulled and leave no jump in the sound – one gear too high, up to
-29 km/h for a few seconds (reported as a jump).
+90 % 4.9 km/h, max 11.5 km/h – including braking in a tunnel, where the
+hidden downshift (gear 5 -> 4, 0.6 s clutch) is found from the distance.
 
 ## Helmet cameras: cockpit and lean angle
 
