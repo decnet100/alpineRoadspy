@@ -8,10 +8,13 @@
 // mismatch of Theta (drift, scale) is spread linearly over the section.
 // Cross-validated on the Samnaun drive (fixes every ~37 s): position error at
 // left-out fixes median 14 -> 9 m, 90 % 38 -> 21 m compared with constant speed.
+// With a speed reference (vrefAt, e.g. from the engine sound; scaled so that it
+// covers exactly the section) the penalty is on deviating from that instead of
+// from the mean speed; turnAt may be omitted to use the reference alone.
 'use strict';
 
 const SpeedFit = (() => {
-  function fitSection({ duration, length, thetaAt, turnAt, dt = 0.2, ds = 1.0, vmax = 110 / 3.6, mu = 300 }) {
+  function fitSection({ duration, length, thetaAt, turnAt, vrefAt = null, dt = 0.2, ds = 1.0, vmax = 110 / 3.6, mu = 300 }) {
     const N = Math.max(1, Math.round(duration / dt));
     const M = Math.max(1, Math.ceil(length / ds));
     const cell = length / M;
@@ -19,11 +22,24 @@ const SpeedFit = (() => {
     const th0 = thetaAt(0);
     for (let j = 0; j <= M; j++) th[j] = thetaAt(j * cell) - th0;
     const vid = new Float64Array(N + 1);
-    const v0 = turnAt(0), endFix = th[M] - (turnAt(duration) - v0);
-    for (let i = 0; i <= N; i++) vid[i] = turnAt(i * duration / N) - v0 + endFix * i / N;
+    if (turnAt) {
+      const v0 = turnAt(0), endFix = th[M] - (turnAt(duration) - v0);
+      for (let i = 0; i <= N; i++) vid[i] = turnAt(i * duration / N) - v0 + endFix * i / N;
+    }
+    // expected cells per time step: the mean, or the speed reference scaled to the section
+    const kref = new Float64Array(N + 1).fill(M / N);
+    if (vrefAt) {
+      let sum = 0;
+      for (let i = 1; i <= N; i++) { const v = vrefAt((i - 0.5) * duration / N); kref[i] = isFinite(v) && v > 0 ? v : NaN; }
+      const known = [...kref.slice(1)].filter(isFinite);
+      const fill = known.length ? known.reduce((a, b) => a + b, 0) / known.length : 1;
+      for (let i = 1; i <= N; i++) { if (!isFinite(kref[i])) kref[i] = fill; sum += kref[i]; }
+      for (let i = 1; i <= N; i++) kref[i] *= M / sum;
+    }
     const vlim = Math.max(vmax, 1.5 * length / duration);   // never below what the section needs
-    const kmax = Math.min(255, Math.max(1, Math.ceil(vlim * duration / N / cell)));
-    const mean = M / N;
+    let kmax = Math.max(1, Math.ceil(vlim * duration / N / cell));
+    if (vrefAt) for (let i = 1; i <= N; i++) kmax = Math.max(kmax, Math.ceil(1.2 * kref[i]));
+    kmax = Math.min(255, kmax);
     let cost = new Float64Array(M + 1).fill(Infinity);
     cost[0] = 0;
     const back = new Uint8Array((N + 1) * (M + 1));
@@ -31,14 +47,15 @@ const SpeedFit = (() => {
     for (let i = 1; i <= N; i++) {
       next.fill(Infinity);
       const row = i * (M + 1);
+      const ref = kref[i];
       for (let k = 0; k <= kmax; k++) {
-        const pen = mu * (k - mean) * (k - mean);
+        const pen = mu * (k - ref) * (k - ref);
         for (let j = k; j <= M; j++) {
           const c = cost[j - k] + pen;
           if (c < next[j]) { next[j] = c; back[row + j] = k; }
         }
       }
-      for (let j = 0; j <= M; j++) { const d = th[j] - vid[i]; next[j] += d * d; }
+      if (turnAt) for (let j = 0; j <= M; j++) { const d = th[j] - vid[i]; next[j] += d * d; }
       [cost, next] = [next, cost];
     }
     const steps = new Int32Array(N + 1);

@@ -247,6 +247,91 @@ def propagate(segs, gear, gaps):
     return gear
 
 
+def read_fixes(path):
+    """[(video_time_s, station_m)] from the fix picker's fixes export."""
+    with open(path, newline="", encoding="utf-8") as f:
+        return sorted((float(r["video_time_s"]), float(r["station_m"])) for r in csv.DictReader(f)
+                      if r.get("station_m") not in (None, ""))
+
+
+def gear_path(f0, ks, vref, allowed, sigma=0.25, switch=60.0):
+    """Gear index per frame (Viterbi): speed ks[g] * f0 close to the reference speed vref
+    (NaN = no reference); the gear changes by one only at a shift jump (`allowed`).
+    Leaving changes elsewhere possible fits the fixes better but predicts positions
+    between them worse (cross-validation on the Samnaun 2 ride).
+    Restricting the direction (up only at upshifts) was tried: downshifts while braking
+    are often not detected, and the cross-validation got no better."""
+    n, g_count = len(f0), len(ks)
+    em = np.zeros((n, g_count))
+    m = ~np.isnan(vref)
+    em[m] = ((np.log(ks)[None, :] + np.log(f0[m])[:, None] - np.log(vref[m])[:, None]) / sigma) ** 2
+    em = em.tolist()
+    cost, back = list(em[0]), np.zeros((n, g_count), np.int8)
+    for i in range(1, n):
+        sw = switch if allowed[i] else float("inf")
+        row, new = em[i], [0.0] * g_count
+        for g in range(g_count):
+            best, bg = cost[g], g
+            if g > 0 and cost[g - 1] + sw < best:
+                best, bg = cost[g - 1] + sw, g - 1
+            if g < g_count - 1 and cost[g + 1] + sw < best:
+                best, bg = cost[g + 1] + sw, g + 1
+            new[g] = best + row[g]
+            back[i, g] = bg
+        cost = new
+    path = np.zeros(n, int)
+    path[-1] = int(np.argmin(cost))
+    for i in range(n - 1, 0, -1):
+        path[i - 1] = back[i, path[i]]
+    return path
+
+
+def fit_from_fixes(t, f0, events, fixes, step, gears=4):
+    """Gear constants from the distances between fixes, without speed readings.
+
+    The gears form a ladder k0 / step^g (step from the upshift jumps); the gear per
+    frame follows the mean speed of its fix interval and may change only at shift
+    jumps; k0 is chosen so that the integrated speed best matches the distances
+    along the route between the fixes. Returns (constants, gear per frame,
+    distance errors in m per fix interval).
+    On the Samnaun 2 ride the speed agrees with the speedometer (corrected by its 6 %
+    over-reading) within median 3.3 km/h. Where the gear changes unnoticed inside a
+    long fix interval, a stretch can get the neighbouring gear (speed off by the
+    gear step), so this is a speed reference, not a measurement."""
+    dt = t[1] - t[0]
+    pairs = [(a, b, sa, sb) for (a, sa), (b, sb) in zip(fixes, fixes[1:]) if a >= t[0] and b <= t[-1] and b > a]
+    if not pairs:
+        raise SystemExit("No two fixes inside the analysed time range")
+    vref = np.full(len(t), np.nan)
+    for a, b, sa, sb in pairs:
+        vref[(t >= a) & (t < b)] = (sb - sa) / (b - a) * 3.6
+    allowed = np.zeros(len(t), bool)
+    for kind, x, _ in events:
+        if kind in ("up", "down", "down-braking"):
+            allowed[np.abs(t - x) < 0.7] = True
+    inside = ~np.isnan(vref) & (vref > 3)
+    k_mid = float(np.median(vref[inside] / f0[inside]))
+    ladder = step ** -np.arange(gears)
+
+    def error(k0):
+        ks = k0 * ladder
+        path = gear_path(f0, ks, vref, allowed)
+        v = ks[path] * f0
+        e = [v[(t >= a) & (t < b)].sum() * dt / 3.6 - (sb - sa) for a, b, sa, sb in pairs]
+        return float(np.sum(np.abs(e))), ks, path, e
+
+    grid = k_mid * np.exp(np.arange(np.log(step ** (gears - 1) * 0.8), np.log(1.25), 0.02))
+    best = min((error(k) for k in grid), key=lambda r: r[0])
+    k_best = best[1][0]
+    for k in k_best * np.exp(np.arange(-0.02, 0.0201, 0.004)):
+        r = error(k)
+        if r[0] < best[0]:
+            best = r
+    _, ks, path, e = best
+    used = sorted(set(path.tolist()))
+    return [float(k) for k in ks], path, e, used
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("video")
@@ -257,6 +342,7 @@ def main():
                         help="engine speed range searched (default 800 7000)")
     parser.add_argument("--min-drive-rpm", type=float, default=1800,
                         help="steady segments only above this engine speed (default 1800)")
+    parser.add_argument("--fixes", help="fixes CSV from the fix picker: fit the gears from the distances between them")
     parser.add_argument("--readings", help="CSV time_s,speed_kmh (e.g. speedometer readings) to fit the gears")
     parser.add_argument("--lag", type=float, default=0.7, help="delay of the readings behind the sound, s (speedometer: 0.7)")
     parser.add_argument("--gear-step", type=float, default=0.79,
@@ -283,16 +369,27 @@ def main():
     load = engine_load(spec, freqs, f0)
     segs = steady_segments(t, f0, load, args.min_drive_rpm * hz_per_rpm)
 
-    consts, gear = [], {}
+    consts, gear, frame_gear = [], {}, None
     readings = read_readings(args.readings) if args.readings else []
-    if readings:
+    if args.fixes:
+        events = find_events(t, f0, load, 0, len(t) - 1, args.gear_step)
+        ups = [r for k, _, r in events if k == "up"]
+        fstep = float(np.median(ups)) if len(ups) >= 2 else args.gear_step
+        events = find_events(t, f0, load, 0, len(t) - 1, fstep)
+        consts, frame_gear, errors, used = fit_from_fixes(t, f0, events, read_fixes(args.fixes), fstep)
+        print(f"  gear step {fstep:.3f} from {len(ups)} upshifts; distance error between fixes: "
+              f"median {np.median(np.abs(errors)):.0f} m, max {np.max(np.abs(errors)):.0f} m")
+        for s_, (i, j) in enumerate(segs):
+            vals = frame_gear[i:j + 1]
+            gear[s_] = int(np.bincount(vals).argmax())
+    elif readings:
         consts, gear = fit_gears(t, f0, segs, readings, args.lag)
     step = float(np.exp(np.mean(np.diff(np.log(consts))))) ** -1 if len(consts) > 1 else args.gear_step
     gaps = []
     for (i0, j0), (i1, _) in zip(segs, segs[1:]):
         before, after = np.median(f0[max(i0, j0 - 6):j0 + 1]), np.median(f0[i1:i1 + 7])
         gaps.append((find_events(t, f0, load, j0 - 2, i1 + 2, step), float(after / before)))
-    if gear:
+    if gear and frame_gear is None:
         gear = propagate(segs, gear, gaps)
 
     seg_of = np.full(len(t), -1)
@@ -300,9 +397,12 @@ def main():
         seg_of[i:j + 1] = s
     name = lambda g: "" if g is None else str(g + args.first_gear)
     speed = np.full(len(t), np.nan)
-    for s, (i, j) in enumerate(segs):
-        if 0 <= gear.get(s, -1) < len(consts):
-            speed[i:j + 1] = consts[gear[s]] * f0[i:j + 1]
+    if frame_gear is not None:        # every frame has a gear
+        speed = np.array(consts)[frame_gear] * f0
+    else:
+        for s, (i, j) in enumerate(segs):
+            if 0 <= gear.get(s, -1) < len(consts):
+                speed[i:j + 1] = consts[gear[s]] * f0[i:j + 1]
 
     with open(out / "track.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -310,7 +410,8 @@ def main():
         for n in range(len(t)):
             s = int(seg_of[n])
             w.writerow([f"{t[n]:.2f}", f"{f0[n]:.2f}", round(f0[n] / hz_per_rpm), f"{load[n]:.3f}", f"{conf[n]:.2f}",
-                        s if s >= 0 else "", name(gear.get(s)) if s >= 0 else "",
+                        s if s >= 0 else "",
+                        name(int(frame_gear[n])) if frame_gear is not None else name(gear.get(s)) if s >= 0 else "",
                         "" if np.isnan(speed[n]) else f"{speed[n]:.1f}"])
     with open(out / "segments.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -349,7 +450,7 @@ def main():
         err = [abs(speed[np.argmin(np.abs(t - (x - args.lag)))] - v) for x, v in readings]
         err = [e for e in err if not np.isnan(e)]
         if err:
-            print(f"  speed vs readings in steady segments: median {np.median(err):.1f}, max {max(err):.1f} km/h ({len(err)} readings)")
+            print(f"  speed vs readings: median {np.median(err):.1f}, max {max(err):.1f} km/h ({len(err)} readings)")
     try:
         plot(out / "plot.png", freqs, t, spec, f0, load, segs, gear, consts, speed, readings, args.lag, name)
     except ImportError:

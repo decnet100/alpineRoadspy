@@ -73,36 +73,54 @@ every ~25 s the position error at the left-out fixes drops from median 10 m /
 90 % 27 m to 8 m / 20 m, with a fix every ~37 s from 14 m / 38 m to 9 m /
 18 m.
 
+For helmet-camera videos the camera's turning is spoiled by head movements.
+If `data/audio/<video>/track.csv` (engine-sound speed, `audio_speed.py
+--fixes`) and `<video>_cockpit.csv` (`cockpit.py`) exist, the fix picker loads
+them: "Drehung aus: Schräglage + Ton" uses the vehicle's turn rate g x
+tan(lean) / speed instead (in degrees, no scale to fit), and "Geschwindigkeit
+aus Ton" makes the engine-sound speed the reference between the fixes (and
+moves the position on after the last fix with it). A second chart shows the
+engine-sound speed next to the trajectory's, and the cockpit parts found are
+outlined over the video (red where uncertain) with the lean angle.
+Cross-validated on the Samnaun 2 ride by leaving out fixes, with the
+engine-sound gears fitted without them: position error at a left-out fix
+(fixes every ~20-40 s) median 25 m -> 5 m (90 %: 75 -> 27 m); with three
+fixes left out 34 -> 13 m (90 % hardly better: 124 -> 116 m, mostly
+stretches with a wrong gear).
+
 ## Speed from the engine sound
 
 ```bash
-python tools/audio_speed.py videos/samnaun2.mp4 --end 3:00 --cylinders 3
+python tools/audio_speed.py videos/samnaun2.mp4 --cylinders 3 --fixes data/samnaun2_fixes.csv
 ```
 
-Work in progress, not yet combined with the fix picker. Uses the original
-video (the `_work.mp4` copies have no audio). It tracks the engine's firing
-frequency f0 (rpm x cylinders / 120 for a four-stroke) and a load indicator
-(share of the upper harmonics, which drops when the throttle closes), splits
-the drive into steady segments (no pitch jumps, no abrupt load changes) and
-lists what happens in the gaps between them: upshifts (pitch falls by the gear
-step), downshifts (rises by it; while braking by less, because the speed falls
-at the same time) and coasting with closed throttle.
+Uses the original video (the `_work.mp4` copies have no audio). It tracks the
+engine's firing frequency f0 (rpm x cylinders / 120 for a four-stroke) and a
+load indicator (share of the upper harmonics, which drops when the throttle
+closes), splits the drive into steady segments (no pitch jumps, no abrupt load
+changes) and lists what happens in the gaps between them: upshifts (pitch falls
+by the gear step), downshifts (rises by it; while braking by less, because the
+speed falls at the same time) and coasting with closed throttle.
 
-Within a steady segment the speed is k_gear x f0 with one constant per gear.
-With speed readings (`--readings`, CSV `time_s,speed_kmh`, e.g. read off the
-speedometer in the video; `--lag` for its delay, 0.7 s for a speedometer) the
-constants are fitted, every segment gets a gear and every frame a speed. The
-gear between two segments must change by the number of shifts found in the
-gap; where it does not, the gap is flagged with the coasting phases in which
-the missing shift probably lies. Results in `data/audio/<video>/`
-(`track.csv`, `segments.csv`, `events.csv`, `gears.csv`, `plot.png`).
+The speed is k_gear x f0 with one constant per gear. With the fixes
+(`--fixes`, the fix picker's CSV export) the gears are fitted without any
+speed reading: they form a ladder with the step measured at the upshifts, the
+gear per moment follows the mean speed of its fix interval and changes only
+at detected shift jumps, and the base constant is chosen so that the
+integrated speed matches the distances along the route between the fixes.
+Alternatively `--readings` (CSV `time_s,speed_kmh`, e.g. read off the
+speedometer; `--lag` for its delay, 0.7 s) fits the gears from readings; the
+gear between two steady segments must then change by the number of shifts
+found in the gap, otherwise the gap is flagged. Results in
+`data/audio/<video>/` (`track.csv`, `segments.csv`, `events.csv`,
+`gears.csv`, `plot.png`); the fix picker loads `track.csv` automatically.
 
-On the first three minutes of the Samnaun 2 ride (Triumph Tiger 1050) two
-gears are found (69 and 54 rpm per speedometer km/h, step 0.787); the
-segments cover 157 of 179 s and match 33 speedometer readings within median
-0.7 km/h (fitted on the same readings). Next step: take the speed reference
-from the fixes (distance along the route between two fixes) instead of the
-speedometer.
+On the first 6½ minutes of the Samnaun 2 ride (Triumph Tiger 1050) the step
+is 0.778 and the speed from the fixes agrees with 39 speedometer readings
+(corrected by the speedometer's 6 % over-reading) within median 3.3 km/h;
+the first 16 s, around the first fix, got the gear below (up to 15 km/h
+off). Where the gear changes unnoticed inside a long fix interval, a stretch
+can get the neighbouring gear – it is a speed reference, not a measurement.
 
 ## Helmet cameras: cockpit and lean angle
 

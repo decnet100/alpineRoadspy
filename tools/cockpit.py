@@ -29,6 +29,7 @@ Writes <video>_cockpit.csv next to the video:
     match                    template match score (0-1), ok (0/1: not an outlier)
     scene_roll_deg           camera roll change since the previous sample (scene)
     lean_deg                 lean of the vehicle
+    width                    width of the video in pixels (x, y refer to it)
 
 On the Samnaun 2 ride (Tiger 1050) the lean agrees with v * omega / g from the
 trajectory with r = 0.80 in the first three minutes and 0.70 over 6.5 minutes. Head yaw from the cockpit's shift did
@@ -342,10 +343,10 @@ def main():
     ok, lean_deg = lean(rows, dt, width)
     with open(cockpit_path(video), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["frame", "time_s", "x", "y", "rot_deg", "match", "ok", "scene_roll_deg", "lean_deg"])
+        w.writerow(["frame", "time_s", "x", "y", "rot_deg", "match", "ok", "scene_roll_deg", "lean_deg", "width"])
         for r, good, phi in zip(rows, ok, lean_deg):
             w.writerow([r[0], f"{r[1]:.3f}", f"{r[2]:.1f}", f"{r[3]:.1f}", f"{r[4]:.2f}", f"{r[5]:.3f}", int(good),
-                        "" if r[6] is None else f"{r[6]:.3f}", f"{phi:.1f}"])
+                        "" if r[6] is None else f"{r[6]:.3f}", f"{phi:.1f}", width])
     print(f"  {len(rows)} samples, {ok.mean():.0%} without outliers -> {cockpit_path(video).name}")
 
 
