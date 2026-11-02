@@ -503,7 +503,8 @@ def resolve_unclear(t, f0, ks, path, speed, pairs, segs, events=(), sigma_m=7.0,
                       nxt = block[0] if len(block) else speed[i1]
                       if abs(np.log(v[0] / speed[i0 - 1])) > 0.08 or abs(np.log(v[-1] / nxt)) > 0.08:
                           continue
-                      cands.append(((v.sum() + block.sum()) * dt / 3.6, length * dt + 0.5 * abs(d_g), start, end,
+                      cands.append(((v.sum() + block.sum()) * dt / 3.6,
+                                    length * dt + 0.5 * abs(d_g), start, end,
                                     np.r_[v, block], g_out))
             if not cands:
                 cands = [(speed[i0:k_end].sum() * dt / 3.6, 0.0, 0, 0, speed[i0:k_end].copy(), g_out0)]
@@ -537,6 +538,26 @@ def resolve_unclear(t, f0, ks, path, speed, pairs, segs, events=(), sigma_m=7.0,
             clutch[i0 + start:i0 + end] = True
             notes.append((float(t[i0]), float(t[i1]), int(g_in), int(g_out), float(t[i0 + start]), (end - start) * dt))
     return speed, path, clutch, notes
+
+
+def smooth_gear_changes(t, f0, ks, path, speed, clutch, window_s=1.0, tol=0.06):
+    """Gear changes without a matching pitch jump (they arise where a gear was corrected
+    from the distances) would make the speed jump: joined over a short clutch window
+    instead, as a shift with the clutch pulled is."""
+    dt = t[1] - t[0]
+    ks = np.asarray(ks)
+    speed, clutch = speed.copy(), clutch.copy()
+    h = max(1, int(window_s / dt / 2))
+    for i in np.flatnonzero(np.diff(path)) + 1:
+        if clutch[max(0, i - h):i + h].any():
+            continue
+        before, after = speed[i - 1], ks[path[i]] * f0[i]
+        if abs(np.log(after / before)) <= tol:
+            continue
+        a, b = max(0, i - h), min(len(t) - 1, i + h)
+        speed[a:b + 1] = np.interp(t[a:b + 1], [t[a], t[b]], [speed[a], speed[b]])
+        clutch[a:b + 1] = True
+    return speed, clutch
 
 
 def fit_from_fixes(t, f0, events, fixes, step, gears=6):
@@ -632,8 +653,13 @@ def main():
         print(f"  gear step {fstep:.3f} from {len(ups)} upshifts; distance error between fixes: "
               f"median {np.median(np.abs(errors)):.0f} m, max {np.max(np.abs(errors)):.0f} m")
         pairs = [(a, b, sa, sb) for (a, sa), (b, sb) in zip(fixes, fixes[1:]) if a >= t[0] and b <= t[-1] and b > a]
-        resolved = resolve_unclear(t, f0, consts, frame_gear, speed_from_path(t, f0, consts, frame_gear, valid), pairs, segs, events)
-        speed_fixed, frame_gear, clutch, notes = resolved
+        speed_fixed, frame_gear, clutch, notes = resolve_unclear(
+            t, f0, consts, frame_gear, speed_from_path(t, f0, consts, frame_gear, valid), pairs, segs, events)
+        # the speed follows the final gears; interpolated only in the clutch windows
+        inside = speed_fixed.copy()
+        speed_fixed = speed_from_path(t, f0, consts, frame_gear, valid)
+        speed_fixed[clutch] = inside[clutch]
+        speed_fixed, clutch = smooth_gear_changes(t, f0, consts, frame_gear, speed_fixed, clutch)
         for a_, b_, gi, go, at_, ln in notes:
             print(f"  {a_:6.1f}-{b_:6.1f} s: gear {gi + args.first_gear} -> {go + args.first_gear}, "
                   f"sound ignored {ln:.1f} s from {at_:.1f} s (clutch)")
@@ -663,6 +689,7 @@ def main():
                 speed[i:j + 1] = consts[gear[s]] * f0[i:j + 1]
 
     if frame_gear is not None:
+        # quality: speed jumps the analysis produces (a motorcycle does not do them)
         w_ = JUMP_WINDOW * 2                      # 0.5 s
         dv = np.zeros(len(t))
         dv[w_:] = speed[w_:] - speed[:-w_]
@@ -670,9 +697,11 @@ def main():
         for i in range(w_, len(t)):
             if abs(dv[i]) > 8 and abs(dv[i]) >= np.abs(dv[max(0, i - w_):i + w_]).max() and (not odd or t[i] - odd[-1] > 0.5):
                 odd.append(float(t[i]))
-        if odd:
-            print(f"  implausible speed jumps (> 8 km/h in 0.5 s) left at {', '.join(f'{x:.1f}' for x in odd)} s - "
-                  "check there (tunnel echo, undetected shift)")
+        acc = dv / 3.6 / (w_ * (t[1] - t[0]))
+        bad = (acc < -8) | (acc > 5)
+        n_bad = int(np.sum(bad[1:] & ~bad[:-1]) + bad[0])
+        print(f"  speed jumps: {len(odd)} of more than 8 km/h in 0.5 s, {n_bad} beyond 8 m/s^2 braking "
+              f"or 5 m/s^2 accelerating" + (f" - at {', '.join(f'{x:.1f}' for x in odd)} s" if odd else ""))
     with open(out / "track.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["time_s", "f0_hz", "rpm", "load", "confidence", "segment", "gear", "speed_kmh", "clutch"])

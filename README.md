@@ -135,6 +135,10 @@ is 0.784 and the speed from the fixes agrees with 63 speedometer readings
 (corrected by the speedometer's 6 % over-reading) within median 0.8 km/h,
 90 % 4.9 km/h, max 11.5 km/h – including braking in a tunnel, where the
 hidden downshift (gear 5 -> 4, 0.6 s clutch) is found from the distance.
+The tool also counts the speed jumps it produces (a motorcycle does not do
+them): here 1 of more than 8 km/h in 0.5 s (a clutch window braking at
+~8 m/s²), none beyond 8 m/s² braking or 5 m/s² accelerating – the first
+version of this analysis had 18 and 16.
 
 ## Helmet cameras: cockpit and lean angle
 
