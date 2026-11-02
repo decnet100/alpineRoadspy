@@ -35,7 +35,7 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from videoio import full_resolution
+from videoio import cuts_path, full_resolution, read_cuts
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -213,7 +213,7 @@ def absorb_parts(tracks, step, window=1):
     return [t for t, a in zip(tracks, absorbed) if not a]
 
 
-def stitch(tracks, step, max_steps=5):
+def stitch(tracks, step, max_steps=5, cuts=()):
     """Join a track that broke off (blur, short occlusion) with the one continuing it.
 
     Strict on purpose – successive delineator posts look alike: the continuation
@@ -234,6 +234,8 @@ def stitch(tracks, step, max_steps=5):
             start = b[0]
             gap = (start["frame"] - end["frame"]) / step
             if j == i or not 0 < gap <= max_steps or not 0.8 * end["size"] <= start["size"] <= 2.5 * end["size"]:
+                continue
+            if any(end["frame"] < c <= start["frame"] for c in cuts):   # never across a cut
                 continue
             dx, dy = start["cx"] - end["cx"], start["cy"] - end["cy"]
             if len(b) >= 2:   # the continuation must move on in the same direction
@@ -260,13 +262,18 @@ def stitch(tracks, step, max_steps=5):
     return out
 
 
-def track(dets, step, max_gap):
-    """Greedy-optimal frame-to-frame association within one group. Returns lists of detections."""
+def track(dets, step, max_gap, cuts=()):
+    """Greedy-optimal frame-to-frame association within one group. Returns lists of detections.
+    At a cut (frame where the video jumps) all running tracks end."""
     by_frame = {}
     for d in dets:
         by_frame.setdefault(d["frame"], []).append(d)
-    active, done = [], []
+    active, done, last_frame = [], [], None
     for frame in sorted(by_frame):
+        if last_frame is not None and any(last_frame < c <= frame for c in cuts):
+            done += active
+            active = []
+        last_frame = frame
         cur = by_frame[frame]
         alive = [tr for tr in active if frame - tr[-1]["frame"] <= max_gap * step]
         done += [tr for tr in active if tr not in alive]
@@ -643,6 +650,9 @@ def main():
                      # rotation-invariant elongation from detect.py; older files: bounding box aspect
                      "elongation": float(r["elongation"]) if r.get("elongation") else
                                    max(x2 - x1 + 1, y2 - y1 + 1) / min(x2 - x1 + 1, y2 - y1 + 1)})
+    cuts = read_cuts(video)
+    if cuts:
+        print(f"{len(cuts)} cuts in the video ({cuts_path(video).name}): no tracking across them", flush=True)
     before = len(dets)
     dets = merge_split_regions(dets)
     print(f"{before} detections, {before - len(dets)} joined with another region of the same object", flush=True)
@@ -655,8 +665,8 @@ def main():
 
     objects = []
     for group in sorted({d["group"] for d in dets}):
-        raw = track([d for d in dets if d["group"] == group], step, args.max_gap)
-        stitched = stitch(raw, step)
+        raw = track([d for d in dets if d["group"] == group], step, args.max_gap, cuts)
+        stitched = stitch(raw, step, cuts=cuts)
         tracks = absorb_parts(stitched, step)
         print(f"  {group}: {len(raw)} tracks, {len(raw) - len(stitched)} broken ones joined, "
               f"{len(stitched) - len(tracks)} pieces absorbed by the whole object", flush=True)

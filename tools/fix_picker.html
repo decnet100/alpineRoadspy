@@ -17,7 +17,10 @@
   #dropHint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
               color: #aaa; font-size: 15px; text-align: center; padding: 20px; pointer-events: none; }
   .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 5px 8px; border-bottom: 1px solid #ddd; }
+  #seekWrap { position: relative; }
   #seek { width: 100%; margin: 0; }
+  #cutMarks { position: absolute; left: 0; right: 0; top: 0; height: 100%; pointer-events: none; }
+  #cutMarks span { position: absolute; top: 0; width: 2px; height: 100%; background: #d50000; }
   button, label.btn { font: inherit; padding: 3px 8px; border: 1px solid #aaa; border-radius: 3px;
                       background: #f4f4f4; cursor: pointer; white-space: nowrap; }
   button:hover, label.btn:hover { background: #e6e6e6; }
@@ -58,7 +61,7 @@
       <video id="video" preload="auto" muted playsinline></video>
       <div id="dropHint">Video öffnen oder hierher ziehen<br>(auch CSV/GeoJSON-Fixpunkte, GPX/GeoJSON-Referenzlinie)</div>
     </div>
-    <input id="seek" type="range" min="0" max="0" step="any" value="0">
+    <div id="seekWrap"><input id="seek" type="range" min="0" max="0" step="any" value="0"><div id="cutMarks"></div></div>
     <div class="bar">
       <label class="btn">Video öffnen… <input id="videoFile" type="file" accept="video/*"></label>
       <button id="bBack1s" title="Shift+←">−1 s</button>
@@ -181,7 +184,9 @@ const video = document.getElementById('video');
 const $ = (id) => document.getElementById(id);
 // fixes: { id, t, lat, lon, sigma, note, snapIdx, snapManual } + derived: snap, cands, candList, station, offset
 // routes[i]: path between fixes i and i+1: { path: RoadNet.Path, ok, roads, offA, offB }
-const state = { videoName: null, fixes: [], routes: [], ext: null, selected: null, nextId: 1 };
+// cuts: times (s) where the video jumps (from <video>_cuts.csv of prepare_video.py)
+const state = { videoName: null, fixes: [], routes: [], ext: null, selected: null, nextId: 1, cuts: [] };
+const cutBetween = (t0, t1) => state.cuts.some((c) => c > t0 + 1e-6 && c <= t1 + 1e-6);
 let fpsUserSet = false;
 
 function fps() { return Math.max(1, parseFloat($('fps').value) || 30); }
@@ -309,7 +314,7 @@ function renderTable() {
     const r = routed ? state.routes[i - 1] : null;
     const dt = prev ? f.t - prev.t : null;
     const ds = prev ? (r ? r.path.length : dist(prev, f)) : null;
-    const v = prev && dt > 0 ? ds / dt * 3.6 : null;
+    const v = prev && dt > 0 && !cutBetween(prev.t, f.t) ? ds / dt * 3.6 : null;   // across a cut time was skipped
     const tr = document.createElement('tr');
     if (f.id === state.selected) tr.className = 'sel';
     let road = '', roadTitle = '';
@@ -320,10 +325,12 @@ function renderTable() {
     } else if (roadsOn && f.cands === 0) {
       road = '— nichts im Fangradius';
     }
-    const wayTitle = r ? (r.ok ? 'via ' + r.roads.join(' › ') : 'keine Verbindung im Straßennetz gefunden – Luftlinie') : 'Luftlinie';
+    const crossesCut = prev && cutBetween(prev.t, f.t);
+    const wayTitle = (crossesCut ? '✂ Schnitt im Video dazwischen – keine Interpolation. ' : '') +
+      (r ? (r.ok ? 'via ' + r.roads.join(' › ') : 'keine Verbindung im Straßennetz gefunden – Luftlinie') : 'Luftlinie');
     tr.innerHTML = `<td>${i + 1}</td><td>${f.t.toFixed(3)}</td><td>${frameOf(f.t)}</td>
       <td>${dt == null ? '' : dt.toFixed(1)}</td>
-      <td class="${r && !r.ok ? 'soft' : ''}" title="${wayTitle}">${ds == null ? '' : (r && r.ok ? '' : '≈') + ds.toFixed(0)}</td>
+      <td class="${r && !r.ok ? 'soft' : ''}" title="${wayTitle}">${crossesCut ? '✂ ' : ''}${ds == null ? '' : (r && r.ok ? '' : '≈') + ds.toFixed(0)}</td>
       <td class="${v != null && v > 130 ? 'warn' : ''}">${v == null ? '' : v.toFixed(0)}</td>
       <td>${routed && f.station != null ? f.station.toFixed(0) : ''}</td>
       <td class="road${f.cands > 1 ? ' cycle' : ''}" title="${roadTitle}"></td>
@@ -486,7 +493,7 @@ function buildExtension(fixes, routes) {
   if (n < 2) return null;
   const a = fixes[n - 2], b = fixes[n - 1], r = routes[n - 2];
   const dt = b.t - a.t;
-  if (dt <= 0) return null;
+  if (dt <= 0 || cutBetween(a.t, b.t)) return null;   // no speed from a section with a cut
   const speed = r.path.length / dt;
   const remaining = (isFinite(video.duration) ? video.duration : b.t + 600) - b.t;
   const length = Math.min(speed * Math.max(remaining, 0) + 50, 30000);
@@ -564,6 +571,7 @@ function position(t) {
     let i = 1;
     while (i < fx.length - 1 && fx[i].t < t) i++;
     const a = fx[i - 1], b = fx[i];
+    if (cutBetween(a.t, b.t)) return { cut: true };   // video jumps in between: position unknown
     const w = b.t > a.t ? (t - a.t) / (b.t - a.t) : 0;
     if (!routed) {
       return { lat: a.lat + w * (b.lat - a.lat), lon: a.lon + w * (b.lon - a.lon), mode: 'linear',
@@ -578,6 +586,7 @@ function position(t) {
   }
   const ext = state.ext;
   if (!ext) return null;
+  if (cutBetween(ext.t0, t)) return { cut: true };
   const s = ext.speed * (t - ext.t0);
   const p = ext.path.at(s, ext.offset);
   return Object.assign(p, { station: ext.station0 + Math.min(s, ext.path.length), speed: ext.speed,
@@ -590,8 +599,14 @@ function updatePosition() {
   const dur = isFinite(video.duration) ? video.duration : 0;
   $('time').textContent = `${t.toFixed(3)} / ${dur.toFixed(1)} s · F ${frameOf(t)}`;
   if (document.activeElement !== $('seek')) $('seek').value = t;
-  const p = position(t);
+  let p = position(t);
   const info = $('posInfo');
+  if (p && p.cut) {
+    if (map.hasLayer(posMarker)) map.removeLayer(posMarker);
+    info.textContent = '✂ Schnitt im Video zwischen den Fixpunkten – hier einen Fixpunkt setzen';
+    info.className = 'extra';
+    return;
+  }
   if (p) {
     posMarker.setLatLng([p.lat, p.lon]);
     const extra = p.mode.startsWith('extrapoliert');
@@ -607,9 +622,34 @@ function updatePosition() {
 
 // ---------- video ----------
 
+function loadCuts(src) {
+  state.cuts = [];
+  renderCutMarks();
+  if (!/^\//.test(src)) return;   // only for videos served by serve.py
+  fetch(src.replace(/\.[^./]+$/, '_cuts.csv')).then((r) => r.ok ? r.text() : '').then((text) => {
+    state.cuts = text.trim().split(/\r?\n/).slice(1).map((l) => parseFloat(l.split(',')[1])).filter(isFinite);
+    renderCutMarks();
+    if (state.cuts.length) status(`${state.cuts.length} Schnitte im Video – dort keine Interpolation; vor und nach jedem Schnitt einen Fixpunkt setzen.`);
+    refresh();
+  }).catch(() => {});
+}
+
+function renderCutMarks() {
+  const box = $('cutMarks');
+  box.innerHTML = '';
+  if (!isFinite(video.duration)) return;
+  for (const c of state.cuts) {
+    const m = document.createElement('span');
+    m.style.left = `${(100 * c / video.duration).toFixed(3)}%`;
+    m.title = `Schnitt bei ${c.toFixed(1)} s`;
+    box.appendChild(m);
+  }
+}
+
 function loadVideo(src, name) {
   state.videoName = name;
   video.src = src;
+  loadCuts(src);
   $('dropHint').style.display = 'none';
   document.title = `${name} – Fixpunkte`;
   fpsUserSet = false;
@@ -622,7 +662,7 @@ function loadVideo(src, name) {
   }
 }
 
-video.addEventListener('loadedmetadata', () => { $('seek').max = video.duration; scheduleRouting(); updatePosition(); });
+video.addEventListener('loadedmetadata', () => { $('seek').max = video.duration; renderCutMarks(); scheduleRouting(); updatePosition(); });
 video.addEventListener('timeupdate', updatePosition);
 video.addEventListener('seeked', updatePosition);
 video.addEventListener('play', () => { $('bPlay').textContent = '⏸'; });
@@ -754,7 +794,7 @@ function toTrajectoryCsv() {
   for (let f = frameOf(state.fixes[0].t); (f + 0.5) / fps() <= end; f++) {
     const t = (f + 0.5) / fps();
     const p = position(t);
-    if (!p) continue;
+    if (!p || p.cut) continue;
     rows.push([f, t.toFixed(3), p.lon.toFixed(7), p.lat.toFixed(7), num(p.station, 1), num(p.heading, 1),
                num(p.speed * 3.6, 1), p.mode, num(p.offset, 2)].join(','));
   }

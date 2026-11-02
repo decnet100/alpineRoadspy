@@ -7,6 +7,8 @@ Writes next to the input
                       and the fix picker
     <name>_full.mp4   full resolution, only if the source is larger; track.py
                       and signs.py cut their crops from it automatically
+    <name>_work_cuts.csv  frames where the video jumps (cuts, e.g. skipped
+                      tunnels); --cuts-only finds them for an existing copy
 Both come from the same decoded frames in one ffmpeg run, so their frame
 numbers match exactly. H.264 because it decodes several times faster than
 VP9/HEVC/AV1 and plays in every browser; a keyframe every second keeps
@@ -22,6 +24,8 @@ from fractions import Fraction
 from pathlib import Path
 
 import cv2
+
+from videoio import cuts_path, detect_cuts, write_cuts
 
 COMMON_RATES = [Fraction(24000, 1001), Fraction(24), Fraction(25), Fraction(30000, 1001), Fraction(30),
                 Fraction(50), Fraction(60000, 1001), Fraction(60)]
@@ -68,6 +72,18 @@ def encoder_args(nvenc, quality, gop):
     return args + ["-pix_fmt", "yuv420p", "-g", str(gop), "-an", "-movflags", "+faststart"]
 
 
+def find_and_write_cuts(video):
+    """Cut list <name>_cuts.csv: where the video jumps (skipped tunnels etc.). The fix
+    picker does not interpolate across cuts and track.py does not track across them."""
+    print(f"Looking for cuts in {video.name} ...", flush=True)
+    cuts = detect_cuts(video)
+    write_cuts(video, cuts)
+    print(f"  {len(cuts)} cuts -> {cuts_path(video).name}" +
+          (": " + ", ".join(f"{t // 60:.0f}:{t % 60:04.1f}" for _, t, _ in cuts) if cuts else ""))
+    if cuts:
+        print("  In the fix picker, set a fix shortly before and after every cut.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("video")
@@ -79,9 +95,14 @@ def main():
     parser.add_argument("--quality-full", type=int, default=18, help="quality of the full-resolution copy (default 18)")
     parser.add_argument("--keyframe", type=float, default=1, help="seconds between keyframes (default 1; seeking in the fix picker; longer = smaller files)")
     parser.add_argument("--ffmpeg", help="path to ffmpeg (default: from PATH, FFMPEG variable or winget)")
+    parser.add_argument("--cuts-only", action="store_true",
+                        help="only find the cuts of an already prepared video (e.g. videos/samnaun_work.mp4)")
     args = parser.parse_args()
 
     src = Path(args.video)
+    if args.cuts_only:
+        find_and_write_cuts(src)
+        return
     cap = cv2.VideoCapture(str(src))
     width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = frame_rate(cap.get(cv2.CAP_PROP_FPS) or 30)
@@ -122,6 +143,7 @@ def main():
               f"{counts[-1]} frames, {c.get(cv2.CAP_PROP_FPS):.3f} fps")
     if len(set(counts)) > 1:
         print("  WARNING: frame counts differ – crops from the full-resolution copy may be off")
+    find_and_write_cuts(work)
     print(f"Next: python tools/detect.py {work.as_posix()} --step 3")
 
 

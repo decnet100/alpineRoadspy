@@ -38,6 +38,15 @@ come from one ffmpeg run, so frame numbers match. H.264 rather than
 H.265/VP9/AV1: it decodes fastest and plays in every browser. Uses NVENC if
 available. Run all further steps on the `_work.mp4`.
 
+It also looks for cuts (the video jumps, e.g. a skipped tunnel) and writes
+`<name>_work_cuts.csv`; for an already prepared video use
+`python tools/prepare_video.py videos/samnaun_work.mp4 --cuts-only`. Cuts are
+found by a brightness-independent comparison of consecutive frames (tunnel
+portals and exposure changes do not count, fades through black do). The fix
+picker marks them on the time bar, does not interpolate or extrapolate across
+them and asks for a fix shortly before and after each cut; track.py does not
+track across them.
+
 ## Reviewing results
 
 ```bash
