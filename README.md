@@ -104,6 +104,35 @@ segments cover 157 of 179 s and match 33 speedometer readings within median
 from the fixes (distance along the route between two fixes) instead of the
 speedometer.
 
+## Helmet cameras: cockpit and lean angle
+
+```bash
+python tools/cockpit.py videos/samnaun2.mp4 --grid 130
+python tools/cockpit.py videos/samnaun2.mp4
+```
+
+Work in progress. With a helmet camera the image turns with the head too.
+Parts of the cockpit that are rigid with the frame (instrument cluster,
+fairing, windscreen and its clamps – not mirrors, phone holder or switches on
+the handlebar, which steer) are noted once per video as boxes/polygons in
+the pixels of a reference frame: `--grid T` writes that frame with a pixel
+grid to `data/cockpit/<video>_ref.jpg`, the parts go into
+`data/cockpit/<video>.json` (example: `docs/cockpit_example.json`). The
+tool then finds the cockpit in 10 frames per second by matching the edges of
+those parts (robust to shade, backlight and tunnels, also when partly out of
+the image) and writes `<video>_cockpit.csv`: cockpit position and rotation in
+the image, and the lean angle of the vehicle = roll of the scene above the
+cockpit minus roll of the cockpit.
+
+On the Samnaun 2 ride the lean agrees with the lean expected from the
+trajectory (v x turn rate / g) with r = 0.71 and the right magnitude, without
+calibration. Speed from lean and road curvature is right on average but
+scatters by about ±9 km/h, far more than the engine sound; the lean is more
+useful for timing curves. Subtracting the head's turning (from the cockpit's
+sideways shift) did not improve the comparison of camera turning with the
+road – leaning and head movements also shift the near cockpit – so it is not
+applied. About 3 s per video second on a CPU for 4K input.
+
 ## Reviewing results
 
 ```bash
