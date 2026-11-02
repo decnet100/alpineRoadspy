@@ -8,6 +8,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script src="roadnet.js"></script>
+<script src="speedfit.js"></script>
 <style>
   html, body { margin: 0; height: 100%; font: 13px system-ui, sans-serif; color: #222; }
   #app { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); height: 100vh; }
@@ -105,7 +106,8 @@
     <div id="motionWrap">
       <div id="motionHead">
         <span><span class="lg" style="background:#ef6c00"></span>gemessen (Bildbewegung)</span>
-        <span><span class="lg" style="background:#1565c0"></span>erwartet (Straßenkrümmung, konst. v zwischen Fixpunkten)</span>
+        <span><span class="lg" style="background:#1565c0"></span>erwartet (Straßenkrümmung entlang der Route)</span>
+        <label title="Geschwindigkeit zwischen Fixpunkten aus dem Kurvenverlauf statt konstant"><input type="checkbox" id="speedFromCurves" checked> Geschwindigkeit aus Kurven</label>
         <label>Fenster <select id="motionWin"><option>15</option><option selected>30</option><option>60</option><option>120</option></select> s</label>
         <span id="motionInfo"></span>
       </div>
@@ -498,6 +500,52 @@ function applyLaneMode(routes, fixes) {
   fixes.forEach((f, i) => { if (routes[i]?.ok || routes[i - 1]?.ok) f.offset = off; });
 }
 
+// Speed along each section from the camera's turning (speedfit.js): needs the motion
+// timeline and a routed section without a cut. The scale image width -> degrees is
+// fitted first with constant speed.
+function fitTimings(routes, fixes) {
+  routes.forEach((r) => { delete r.timing; });
+  if (!motion.cum || !$('speedFromCurves').checked) return;
+  const scale = fitScale(routes, fixes);
+  if (!scale) return;
+  motion.scale = scale;
+  const turnAt = (t) => { const i = Math.min(motion.cum.length - 1, Math.max(0, Math.round(t * motion.fps))); return motion.cum[i] * scale; };
+  routes.forEach((r, i) => {
+    const a = fixes[i], b = fixes[i + 1];
+    if (!r.ok || b.t - a.t < 1 || r.path.length < 5 || cutBetween(a.t, b.t)) return;
+    const theta = roadHeading(r.path);
+    r.timing = SpeedFit.fitSection({ duration: b.t - a.t, length: r.path.length, thetaAt: theta, turnAt: (t) => turnAt(a.t + t) });
+  });
+}
+
+// heading along a path (degrees, unwrapped) as a function of the station
+function roadHeading(path) {
+  const n = Math.max(2, Math.ceil(path.length)), h = new Float64Array(n + 1);
+  for (let k = 0; k <= n; k++) {
+    const [ex, ey] = path.direction(k * path.length / n);
+    let d = Math.atan2(ex, ey) * 180 / Math.PI;
+    if (k) { while (d - h[k - 1] > 180) d -= 360; while (d - h[k - 1] < -180) d += 360; }
+    h[k] = d;
+  }
+  return (s) => { const f = Math.min(n, Math.max(0, s / path.length * n)), i = Math.min(n - 1, Math.floor(f)); return h[i] + (f - i) * (h[i + 1] - h[i]); };
+}
+
+// least squares scale between measured (image widths/s) and expected heading rate (deg/s) at constant speed
+function fitScale(routes, fixes) {
+  let num = 0, den = 0, cnt = 0;
+  routes.forEach((r, i) => {
+    const a = fixes[i], b = fixes[i + 1];
+    if (!r.ok || b.t - a.t < 1 || cutBetween(a.t, b.t)) return;
+    const theta = roadHeading(r.path), v = r.path.length / (b.t - a.t);
+    for (let t = a.t + 0.5; t < b.t - 0.5; t += 0.1) {
+      const e = (theta((t + 0.5 - a.t) * v) - theta((t - 0.5 - a.t) * v));
+      const m = measuredAt(t);
+      if (isFinite(m) && Math.abs(e) < 60) { num += m * e; den += m * m; cnt++; }
+    }
+  });
+  return cnt > 50 && den > 0 ? num / den : null;
+}
+
 function routePair(a, b) {
   const straight = dist(a, b);
   let best = null;
@@ -586,6 +634,7 @@ async function routeAll() {
     if (routes[i]) station += routes[i].path.length;
   });
   applyLaneMode(routes, fixes);
+  fitTimings(routes, fixes);
   state.routes = routes;
   state.ext = buildExtension(fixes, routes);
   computeExpected();
@@ -612,11 +661,12 @@ function position(t) {
                speed: b.t > a.t ? dist(a, b) / (b.t - a.t) : 0 };
     }
     const r = routes[i - 1];
-    const s = w * r.path.length;
-    const off = r.offA + w * (r.offB - r.offA);   // lateral offset from the road axis, left positive
+    let s = w * r.path.length, speed = b.t > a.t ? r.path.length / (b.t - a.t) : 0;
+    if (r.timing) { const q = SpeedFit.at(r.timing, t - a.t); s = q.s; speed = q.v; }
+    const off = r.offA + (s / Math.max(r.path.length, 1e-9)) * (r.offB - r.offA);   // lateral offset, left positive
     const p = r.path.at(s, off);
-    return Object.assign(p, { station: a.station + s, speed: b.t > a.t ? r.path.length / (b.t - a.t) : 0,
-                              offset: r.ok ? off : null, mode: r.ok ? 'interpoliert' : 'Luftlinie' });
+    return Object.assign(p, { station: a.station + s, speed, offset: r.ok ? off : null,
+                              mode: r.ok ? (r.timing ? 'aus Kurven' : 'interpoliert') : 'Luftlinie' });
   }
   const ext = state.ext;
   if (!ext) return null;
@@ -679,7 +729,10 @@ async function loadMotion(src) {
       for (let j = i - k; j <= i + k; j++) if (j >= 0 && j < yaw.length && !isNaN(yaw[j])) { sum += yaw[j]; n++; }
       rate[i] = n > k ? sum / n * motion.fps : NaN;
     }
-    motion.t = t; motion.rate = rate;
+    const cum = new Float64Array(yaw.length);
+    for (let i = 0, c = 0; i < yaw.length; i++) { c += isNaN(yaw[i]) ? 0 : yaw[i]; cum[i] = c; }
+    motion.t = t; motion.rate = rate; motion.cum = cum;
+    scheduleRouting();   // fit the speed along the sections with the new data
     computeExpected();
   } catch (err) {
     $('motionInfo').textContent = 'keine Bewegungsdaten (prepare_video.py --cuts-only erzeugt sie)';
@@ -717,7 +770,7 @@ function computeExpected() {
       const e = exp[i], m = measuredAt(t0 + i * motion.expDt);
       if (isFinite(e) && isFinite(m) && Math.abs(e) < 60) { num += m * e; den += m * m; cnt++; }
     }
-    motion.scale = cnt > 50 && den > 0 ? num / den : null;
+    if (!state.routes.some((r) => r.timing)) motion.scale = cnt > 50 && den > 0 ? num / den : null;
   }
   drawMotion();
 }
@@ -784,6 +837,8 @@ $('motion').addEventListener('click', (e) => {
   video.currentTime = Math.max(0, video.currentTime - half + (e.clientX - r.left) / r.width * 2 * half);
 });
 $('motionWin').onchange = () => { drawMotion(); $('motionWin').blur(); };
+$('speedFromCurves').onchange = () => { localStorage.setItem('fixpicker:speedFromCurves', $('speedFromCurves').checked ? '1' : '0'); $('speedFromCurves').blur(); scheduleRouting(); };
+$('speedFromCurves').checked = localStorage.getItem('fixpicker:speedFromCurves') !== '0';
 window.addEventListener('resize', drawMotion);
 $('laneMode').onchange = () => { localStorage.setItem('fixpicker:lane', $('laneMode').value); $('laneMode').blur(); scheduleRouting(); };
 $('laneWidth').onchange = () => { localStorage.setItem('fixpicker:laneWidth', $('laneWidth').value); scheduleRouting(); };
