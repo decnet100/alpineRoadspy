@@ -157,8 +157,10 @@ not do them): here 2 of more than 8 km/h in 0.5 s (the two braking clutch
 windows), none beyond 8 m/s² braking or 5 m/s² accelerating – the first
 version of this analysis had 18 and 16. Outside the stretch covered by fixes
 the gears follow from the sound alone, without a distance check; the tool
-says so – on the whole Samnaun 2 video, with fixes only for the first 6½
-minutes, 17 of 19 jumps lie beyond them.
+says so. On the whole Samnaun 2 video with fixes up to 12 minutes, the
+speed agrees with 80 speedometer readings (corrected by its 6 %
+over-reading) within median 0.8 km/h, 90 % 4.9 km/h; 10 jumps of more than
+8 km/h in 0.5 s are left (four in a tunnel, four beyond the fixes).
 
 ## Helmet cameras: cockpit and lean angle
 

@@ -296,7 +296,7 @@ def read_fixes(path):
 def fix_octaves(t, f0, max_len_s=15.0):
     """Stretches tracked at twice or three times (or a half / third of) the pitch: entered
     and left by big jumps in opposite directions (beyond 1.5x, more than a gear step),
-    shorter than max_len_s, and at 1.7-2.4x or 2.6-3.5x (or the inverse) the pitch around
+    shorter than max_len_s, and at 1.5-2.4x or 2.6-3.5x (or the inverse) the pitch around
     them - corrected by that factor. Happens in slow hairpins, where the fundamental is
     weak; a factor 3 on a triple, whose crankshaft cycle is a third of the firing rate."""
     lf = np.log(f0).copy()
@@ -326,9 +326,12 @@ def fix_octaves(t, f0, max_len_s=15.0):
             inside = np.median(lf[a:b - w + 1]) if b - w + 1 > a else lf[a]
             around = np.median(np.r_[lf[max(0, a - w - int(2 / dt)):a - w + 1], lf[b:b + int(2 / dt)]])
             r = inside - around
-            for factor, lo_, hi_ in ((2.0, 1.7, 2.4), (3.0, 2.6, 3.5)):
+            for factor, lo_, hi_ in ((2.0, 1.5, 2.4), (3.0, 2.6, 3.5)):
                 if np.log(lo_) <= abs(r) <= np.log(hi_):
-                    out[a - w + 1:b - w + 1] = f0[a - w + 1:b - w + 1] / (factor if r > 0 else 1 / factor)
+                    # all samples of the stretch (with the jumps' ramps) that are clearly off
+                    span = np.arange(max(0, a - w), min(len(lf), b + 1))
+                    off = np.sign(r) * (lf[span] - around) > np.log(1.3)
+                    out[span[off]] = f0[span[off]] / (factor if r > 0 else 1 / factor)
                     used = b
             break
     return out
