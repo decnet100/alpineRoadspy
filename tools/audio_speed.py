@@ -91,6 +91,45 @@ def spectrogram(audio, max_hz=1000):
     return freqs[keep], times, np.clip(power - np.median(power, axis=1, keepdims=True), 0, None)
 
 
+def detect_clicks(video, start, end, ffmpeg, rate=44100, band=(1500, 11000), rise_db=8.0, min_strength=0.25):
+    """Short metallic shift noises: the share of frequencies between 1.5 and 11 kHz whose
+    level jumps by more than rise_db against the 30 ms before (6 ms steps). The engine is
+    low and steady there, a shift click broad and abrupt; above ~12 kHz the compressed
+    sound tracks of online videos are cut off and show codec artefacts. Read at 44.1 kHz:
+    at 16 kHz the band is too narrow and other noises reach the same strength.
+    Returns [(time_s, strength)], peaks at least 0.3 s apart.
+    On the Samnaun 2 ride all clicks of strength >= 0.33 were shifts (9, including one
+    hidden by the clutch while braking); upshifts in a loud tunnel were not heard."""
+    from scipy.signal import find_peaks
+
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", str(start)]
+    if end is not None:
+        cmd += ["-t", str(end - start)]
+    cmd += ["-i", str(video), "-vn", "-ac", "1", "-ar", str(rate), "-f", "s16le", "-"]
+    x = np.frombuffer(subprocess.run(cmd, capture_output=True, check=True).stdout, dtype=np.int16).astype(np.float32) / 32768
+    n_fft, hop, k = 1024, 256, 5
+    window = np.hanning(n_fft).astype(np.float32)
+    freqs = np.fft.rfftfreq(n_fft, 1 / rate)
+    sel = (freqs > band[0]) & (freqs < band[1])
+    n = (len(x) - n_fft) // hop + 1
+    if n <= k:
+        return []
+    share = np.zeros(n, np.float32)
+    tail = None                                      # the k frames before each chunk
+    for a in range(0, n, 20000):
+        idx = np.arange(a, min(n, a + 20000))[:, None] * hop + np.arange(n_fft)
+        level = 20 * np.log10(np.abs(np.fft.rfft(x[idx] * window, axis=1))[:, sel] + 1e-9)
+        full = level if tail is None else np.vstack([tail, level])
+        off = 0 if tail is None else len(tail)
+        c = np.cumsum(np.vstack([np.repeat(full[:1], k, axis=0), full]), axis=0)
+        prev = (c[k - 1 + off:-1] - np.vstack([np.zeros((1, full.shape[1])), c[:-k - 1]])[off:]) / k
+        share[a:a + len(level)] = ((level - prev[:len(level)]) > rise_db).mean(axis=1)
+        tail = level[-k:]
+    times = (np.arange(n) * hop + n_fft / 2) / rate + start
+    peaks, _ = find_peaks(share, height=min_strength, distance=int(0.3 * rate / hop))
+    return [(float(times[p]), float(share[p])) for p in peaks if times[p] > start + 0.2]
+
+
 def at_freq(spec, freqs, fr):
     """Spectrogram values at (fractional) frequencies fr, shape fr.shape + (frames,)."""
     idx = np.interp(fr, freqs, np.arange(len(freqs)))
@@ -399,8 +438,8 @@ def match_distances(t, f0, ks, valid, pairs, path, iters=40, rate=0.5, sigma=1.0
     return best_path, list(best_e)
 
 
-def resolve_unclear(t, f0, ks, path, speed, pairs, segs, events=(), sigma_m=7.0, max_clutch_s=3.0,
-                    brake=8.0, accel=5.0):
+def resolve_unclear(t, f0, ks, path, speed, pairs, segs, events=(), clicks=(), sigma_m=7.0, max_clutch_s=3.0,
+                    brake=8.0, accel=5.0, strong=0.33):
     """Stretches between sure parts, filled so that each fix interval's distance is met.
 
     Sure: steady segments with one gear. In a fix interval of 10 s or more, the sure
@@ -413,7 +452,10 @@ def resolve_unclear(t, f0, ks, path, speed, pairs, segs, events=(), sigma_m=7.0,
     searched so that the interval's distance is met (within sigma_m), preferring short
     windows. Where the throttle was closed in the stretch (coasting: clutch possibly
     pulled, shifts hidden), the gear after it is open too (-2..+1), for the following
-    sure part up to its next gear change. The stretches of an interval are combined by
+    sure part up to its next gear change. A strong shift click (detect_clicks) opens a
+    stretch around it even where the pitch is steady, and a gear change chosen in a
+    stretch with a click must happen there: the clutch window contains the click, or a
+    shift without window follows it within 0.6 s. The stretches of an interval are combined by
     dynamic programming over the distance (1 m steps). Returns (speed, gear, clutch mask,
     notes). On the Samnaun 2 ride this finds the downshift hidden while braking in a
     tunnel (0.6 s clutch); speed vs. 63 speedometer readings (corrected by its 6 %
@@ -426,6 +468,11 @@ def resolve_unclear(t, f0, ks, path, speed, pairs, segs, events=(), sigma_m=7.0,
     for i, j in segs:
         if len(set(path[i:j + 1].tolist())) == 1:
             sure[i:j + 1] = True
+    click_at = np.zeros(len(t), bool)
+    for x, strength in clicks:
+        if strength >= strong:
+            click_at[np.argmin(np.abs(t - x))] = True
+            sure[(t >= x - 0.3) & (t <= x + 1.5)] = False     # a shift may be hidden here
     notes = []
     w = int(0.5 / dt)
     coast = np.zeros(len(t), bool)
@@ -455,7 +502,7 @@ def resolve_unclear(t, f0, ks, path, speed, pairs, segs, events=(), sigma_m=7.0,
                 continue
             g_in, g_out = path[i0 - 1], path[i1]
             jump = np.abs(speed[i0 + w:i1] - speed[i0:i1 - w]).max() > 8 if i1 - i0 > w else False
-            hidden = coast[i0:i1].any()
+            hidden = coast[i0:i1].any() or click_at[i0:i1].any()
             if g_in != g_out or jump or hidden:
                 # the sure part after it, up to its next gear change, follows the gear chosen here
                 k = i1
@@ -470,68 +517,79 @@ def resolve_unclear(t, f0, ks, path, speed, pairs, segs, events=(), sigma_m=7.0,
                      for n, (i0, i1, gi, go, k, dl) in enumerate(open_runs)]
         fixed = speed[lo:hi].sum() * dt / 3.6 - sum(speed[i0:k].sum() * dt / 3.6 for i0, _, _, _, k, _ in open_runs)
         rest = (sb - sa) - fixed
-        # candidates per open stretch: (distance, clutch length, start, end, speed array, gear after)
-        options = []
-        for i0, i1, g_in, g_out0, k_end, deltas in open_runs:
-            cands = []
-            n = i1 - i0
-            step_f = max(1, int(0.2 / dt))
+        step_f = max(1, int(0.2 / dt))
+
+        def candidates(run, g_in):
+            """(distance, cost, start, end, speeds up to the block's end, gear after) for one
+            open stretch entered in gear g_in; per whole metre only the cheapest."""
+            i0, i1, _, g_out0, k_end, deltas = run
+            n, cands = i1 - i0, []
+            ci = np.flatnonzero(click_at[i0:i1])
+            v_in = ks[g_in] * f0[i0 - 1]
             for d_g in deltas:
-              g_out = g_out0 + d_g
-              if not 0 <= g_out < len(ks):
-                  continue
-              block = ks[g_out] * f0[i1:k_end]
-              for start in range(0, n + 1, step_f):
-                  for length in range(0, int(max_clutch_s / dt) + 1, step_f):
-                      end = start + length
-                      if end > n:
-                          break
-                      v = np.empty(n)
-                      v[:start] = ks[g_in] * f0[i0:i0 + start]
-                      v[end:] = ks[g_out] * f0[i0 + end:i1]
-                      v_before = ks[g_in] * f0[i0 + start - 1] if start > 0 else speed[i0 - 1]
-                      v_after = ks[g_out] * f0[i0 + end] if end < n else (block[0] if len(block) else speed[i1])
-                      if length == 0:
-                          if abs(np.log(v_after / v_before)) > 0.06:     # a shift without clutch time keeps the speed
-                              continue
-                      else:
-                          a_ms = (v_after - v_before) / 3.6 / (length * dt)
-                          if a_ms < -brake or a_ms > accel:
-                              continue
-                          v[start:end] = v_before + (v_after - v_before) * (np.arange(1, length + 1) / (length + 1))
-                      # ends must join the sure neighbours
-                      nxt = block[0] if len(block) else speed[i1]
-                      if abs(np.log(v[0] / speed[i0 - 1])) > 0.08 or abs(np.log(v[-1] / nxt)) > 0.08:
-                          continue
-                      cands.append(((v.sum() + block.sum()) * dt / 3.6,
-                                    length * dt + 0.5 * abs(d_g), start, end,
-                                    np.r_[v, block], g_out))
-            if not cands:
+                g_out = g_out0 + d_g
+                if not 0 <= g_out < len(ks):
+                    continue
+                block = ks[g_out] * f0[i1:k_end]
+                nxt = block[0] if len(block) else speed[i1]
+                for start in range(0, n + 1, step_f):
+                    for length in range(0, int(max_clutch_s / dt) + 1, step_f):
+                        end = start + length
+                        if end > n:
+                            break
+                        v = np.empty(n)
+                        v[:start] = ks[g_in] * f0[i0:i0 + start]
+                        v[end:] = ks[g_out] * f0[i0 + end:i1]
+                        v_before = ks[g_in] * f0[i0 + start - 1] if start > 0 else v_in
+                        v_after = ks[g_out] * f0[i0 + end] if end < n else nxt
+                        if len(ci) and g_out != g_in:      # the shift happens at the click
+                            if length == 0:
+                                if not any(0 <= start - c_ <= int(0.6 / dt) for c_ in ci):
+                                    continue
+                            elif not any(start <= c_ <= end for c_ in ci):
+                                continue
+                        if length == 0:
+                            if abs(np.log(v_after / v_before)) > 0.06:     # a shift without clutch time keeps the speed
+                                continue
+                        else:
+                            a_ms = (v_after - v_before) / 3.6 / (length * dt)
+                            if a_ms < -brake or a_ms > accel:
+                                continue
+                            v[start:end] = v_before + (v_after - v_before) * (np.arange(1, length + 1) / (length + 1))
+                        if abs(np.log(v[0] / v_in)) > 0.08 or abs(np.log(v[-1] / nxt)) > 0.08:
+                            continue
+                        cands.append(((v.sum() + block.sum()) * dt / 3.6, length * dt + 0.5 * abs(d_g),
+                                      start, end, np.r_[v, block], g_out))
+            if not cands and g_in == path[i0 - 1]:
                 cands = [(speed[i0:k_end].sum() * dt / 3.6, 0.0, 0, 0, speed[i0:k_end].copy(), g_out0)]
-            # per whole metre keep only the cheapest candidate
             by_m = {}
             for cand in cands:
                 m_ = int(round(cand[0]))
                 if m_ not in by_m or cand[1] < by_m[m_][1]:
                     by_m[m_] = cand
-            options.append(list(by_m.values()))
-        # combine (one option per stretch): distance close to the rest, little clutch time -
-        # dynamic programming over the distance in 1 m steps
-        states = {0: (0.0, [])}                          # metres so far -> (cost, choices)
-        for cands in options:
-            nxt = {}
-            for m0, (c0, ch) in states.items():
-                for n_c, cand in enumerate(cands):
-                    m1 = m0 + int(round(cand[0]))
+            return list(by_m.values())
+
+        # combine the stretches: dynamic programming over (metres so far, gear at the end of
+        # the last block); a stretch right after a block is entered in that block's gear
+        states = {(0, None): (0.0, [])}
+        cache = {}
+        for n_r, run in enumerate(open_runs):
+            chained = n_r > 0 and open_runs[n_r - 1][4] == run[0]
+            nxt_states = {}
+            for (m0, g_last), (c0, ch) in states.items():
+                g_in = g_last if chained and g_last is not None else run[2]
+                if (n_r, g_in) not in cache:
+                    cache[(n_r, g_in)] = candidates(run, g_in)
+                for cand in cache[(n_r, g_in)]:
+                    key = (m0 + int(round(cand[0])), cand[5])
                     c1 = c0 + cand[1]
-                    if m1 not in nxt or c1 < nxt[m1][0]:
-                        nxt[m1] = (c1, ch + [n_c])
-            states = nxt
+                    if key not in nxt_states or c1 < nxt_states[key][0]:
+                        nxt_states[key] = (c1, ch + [(g_in, cand)])
+            states = nxt_states
         if not states:
             continue
-        m_best = min(states, key=lambda m_: ((m_ - rest) / sigma_m) ** 2 + 0.5 * states[m_][0])
-        best = (None, [options[n][c] for n, c in enumerate(states[m_best][1])])
-        for (i0, i1, g_in, _, k_end, _), (d, cost, start, end, v, g_out) in zip(open_runs, best[1]):
+        key = min(states, key=lambda k_: ((k_[0] - rest) / sigma_m) ** 2 + 0.5 * states[k_][0])
+        for (i0, i1, _, _, k_end, _), (g_in, (d, cost, start, end, v, g_out)) in zip(open_runs, states[key][1]):
             speed[i0:k_end] = v
             path[i0:i0 + start] = g_in
             path[i0 + start:k_end] = g_out
@@ -653,8 +711,11 @@ def main():
         print(f"  gear step {fstep:.3f} from {len(ups)} upshifts; distance error between fixes: "
               f"median {np.median(np.abs(errors)):.0f} m, max {np.max(np.abs(errors)):.0f} m")
         pairs = [(a, b, sa, sb) for (a, sa), (b, sb) in zip(fixes, fixes[1:]) if a >= t[0] and b <= t[-1] and b > a]
+        clicks = detect_clicks(video, start, end, find_ffmpeg(args.ffmpeg))
+        print(f"  {len(clicks)} shift clicks heard, {sum(1 for _, s_ in clicks if s_ >= 0.33)} strong: "
+              + ", ".join(f"{x:.1f}" for x, s_ in clicks if s_ >= 0.33) + " s")
         speed_fixed, frame_gear, clutch, notes = resolve_unclear(
-            t, f0, consts, frame_gear, speed_from_path(t, f0, consts, frame_gear, valid), pairs, segs, events)
+            t, f0, consts, frame_gear, speed_from_path(t, f0, consts, frame_gear, valid), pairs, segs, events, clicks)
         # the speed follows the final gears; interpolated only in the clutch windows
         inside = speed_fixed.copy()
         speed_fixed = speed_from_path(t, f0, consts, frame_gear, valid)

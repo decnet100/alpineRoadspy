@@ -130,14 +130,24 @@ coasting phase that gear is open too, for the sure stretch that follows.
 Time and length of the clutch window and the gear are chosen so that the
 interval's distance is met (column `clutch` in `track.csv`).
 
+Shifts are often audible as a short metallic click (the lever, with the
+clutch pulled). The tool reads the sound at 44.1 kHz for that and looks for
+abrupt broadband rises between 1.5 and 11 kHz, where the engine is low and
+steady (above ~12 kHz the compressed sound tracks of online videos are cut
+off). A strong click opens a stretch for the check above even where the
+pitch is steady, and a gear change chosen there must happen at the click.
+On the Samnaun 2 ride all 9 strong clicks were shifts, including the one
+hidden by the clutch while braking in a tunnel; upshifts in the loud tunnel
+were not heard.
+
 On the first 6½ minutes of the Samnaun 2 ride (Triumph Tiger 1050) the step
 is 0.784 and the speed from the fixes agrees with 63 speedometer readings
 (corrected by the speedometer's 6 % over-reading) within median 0.8 km/h,
 90 % 4.9 km/h, max 11.5 km/h – including braking in a tunnel, where the
-hidden downshift (gear 5 -> 4, 0.6 s clutch) is found from the distance.
-The tool also counts the speed jumps it produces (a motorcycle does not do
-them): here 1 of more than 8 km/h in 0.5 s (a clutch window braking at
-~8 m/s²), none beyond 8 m/s² braking or 5 m/s² accelerating – the first
+hidden downshifts (gear 5 -> 4 -> 3, each at its click) are found from the
+distance. The tool also counts the speed jumps it produces (a motorcycle does
+not do them): here 2 of more than 8 km/h in 0.5 s (the two braking clutch
+windows), none beyond 8 m/s² braking or 5 m/s² accelerating – the first
 version of this analysis had 18 and 16.
 
 ## Helmet cameras: cockpit and lean angle
