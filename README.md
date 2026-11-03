@@ -111,8 +111,11 @@ anchor it by distance, not by mean speed: per fix interval (of 10 s or more)
 a cost per metre is raised or lowered until the integrated speed matches the
 distance along the route, so a stretch ridden at 41-92 km/h keeps its
 course; the base constant is chosen the same way over all intervals.
-Stretches tracked at twice the pitch (slow hairpins) are halved, short pitch
-and speed outliers bridged; speed jumps that are left (more than 8 km/h in
+Stretches tracked at twice or three times the pitch (slow hairpins; on a
+triple a third of the firing rate is the crankshaft cycle) are corrected,
+short pitch and speed outliers bridged; after the ladder, the constants are
+fitted per gear to the distances (a gearbox is no exact ladder), held near
+it; speed jumps that are left (more than 8 km/h in
 0.5 s) are reported. Alternatively `--readings` (CSV `time_s,speed_kmh`,
 e.g. read off the speedometer; `--lag` for its delay, 0.7 s) fits the gears
 from readings. Results in `data/audio/<video>/` (`track.csv`,
@@ -152,7 +155,10 @@ hidden downshifts (gear 5 -> 4 -> 3, each at its click) are found from the
 distance. The tool also counts the speed jumps it produces (a motorcycle does
 not do them): here 2 of more than 8 km/h in 0.5 s (the two braking clutch
 windows), none beyond 8 m/s² braking or 5 m/s² accelerating – the first
-version of this analysis had 18 and 16.
+version of this analysis had 18 and 16. Outside the stretch covered by fixes
+the gears follow from the sound alone, without a distance check; the tool
+says so – on the whole Samnaun 2 video, with fixes only for the first 6½
+minutes, 17 of 19 jumps lie beyond them.
 
 ## Helmet cameras: cockpit and lean angle
 

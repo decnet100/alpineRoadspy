@@ -294,10 +294,11 @@ def read_fixes(path):
 
 
 def fix_octaves(t, f0, max_len_s=15.0):
-    """Stretches tracked at twice (or half) the pitch: entered and left by big jumps in
-    opposite directions (beyond 1.5x, more than a gear step), shorter than max_len_s,
-    and at 1.7-2.4x (or the inverse) the pitch around them - corrected by the factor 2.
-    Happens in slow hairpins, where the fundamental is weak."""
+    """Stretches tracked at twice or three times (or a half / third of) the pitch: entered
+    and left by big jumps in opposite directions (beyond 1.5x, more than a gear step),
+    shorter than max_len_s, and at 1.7-2.4x or 2.6-3.5x (or the inverse) the pitch around
+    them - corrected by that factor. Happens in slow hairpins, where the fundamental is
+    weak; a factor 3 on a triple, whose crankshaft cycle is a third of the firing rate."""
     lf = np.log(f0).copy()
     w = JUMP_WINDOW
     d = np.zeros(len(lf))
@@ -325,9 +326,10 @@ def fix_octaves(t, f0, max_len_s=15.0):
             inside = np.median(lf[a:b - w + 1]) if b - w + 1 > a else lf[a]
             around = np.median(np.r_[lf[max(0, a - w - int(2 / dt)):a - w + 1], lf[b:b + int(2 / dt)]])
             r = inside - around
-            if np.log(1.7) <= abs(r) <= np.log(2.4):
-                out[a - w + 1:b - w + 1] = f0[a - w + 1:b - w + 1] / (2.0 if r > 0 else 0.5)
-                used = b
+            for factor, lo_, hi_ in ((2.0, 1.7, 2.4), (3.0, 2.6, 3.5)):
+                if np.log(lo_) <= abs(r) <= np.log(hi_):
+                    out[a - w + 1:b - w + 1] = f0[a - w + 1:b - w + 1] / (factor if r > 0 else 1 / factor)
+                    used = b
             break
     return out
 
@@ -668,6 +670,24 @@ def fit_from_fixes(t, f0, events, fixes, step, gears=6):
             best = r
     _, ks, path, e = best
     path, e = match_distances(t, f0, ks, valid, pairs, path)
+    # a gearbox is no exact ladder: fit the constants per gear to the distances (linear
+    # least squares, given the gears), held near the ladder, then choose the gears again
+    ladder_ks = ks.copy()
+    for _ in range(3):
+        a_m = np.zeros((len(pairs), len(ks)))
+        for k_, (a, b, sa, sb) in enumerate(pairs):
+            m = (t >= a) & (t < b) & valid
+            a_m[k_] = np.bincount(path[m], weights=f0[m], minlength=len(ks))[:len(ks)] * dt / 3.6
+        d_v = np.array([sb - sa for a, b, sa, sb in pairs])
+        reg = 500.0                                   # metres per unit of k: deviation from the ladder
+        lhs = np.vstack([a_m, reg * np.eye(len(ks))])
+        rhs = np.r_[d_v, reg * ladder_ks]
+        new_ks = np.linalg.lstsq(lhs, rhs, rcond=None)[0]
+        if np.any(np.diff(new_ks) <= 0) or np.any(new_ks <= 0):
+            break
+        ks = new_ks
+        path = gear_path(f0, ks, vref, valid)
+        path, e = match_distances(t, f0, ks, valid, pairs, path)
     used = sorted(set(path.tolist()))
     return [float(k) for k in ks], path, e, used, valid
 
@@ -736,8 +756,12 @@ def main():
         speed_fixed[clutch] = inside[clutch]
         speed_fixed, clutch = smooth_gear_changes(t, f0, consts, frame_gear, speed_fixed, clutch)
         for a_, b_, gi, go, at_, ln in notes:
-            print(f"  {a_:6.1f}-{b_:6.1f} s: gear {gi + args.first_gear} -> {go + args.first_gear}, "
-                  f"sound ignored {ln:.1f} s from {at_:.1f} s (clutch)")
+            if gi != go or ln > 0:
+                print(f"  {a_:6.1f}-{b_:6.1f} s: gear {gi + args.first_gear} -> {go + args.first_gear}, "
+                      f"sound ignored {ln:.1f} s from {at_:.1f} s (clutch)")
+        if pairs and (pairs[0][0] > t[0] + 30 or pairs[-1][1] < t[-1] - 30):
+            print(f"  fixes cover {pairs[0][0]:.0f}-{pairs[-1][1]:.0f} s of {t[0]:.0f}-{t[-1]:.0f} s: outside, the gears "
+                  "follow from the sound alone (no distance check) - set fixes there for a reliable speed")
         for s_, (i, j) in enumerate(segs):
             vals = frame_gear[i:j + 1]
             gear[s_] = int(np.bincount(vals).argmax())
@@ -819,7 +843,8 @@ def main():
             if ev or check:
                 text = "; ".join(f"{k} {tt:.1f}s {'x' if k != 'coast' else ''}{v}{'s' if k == 'coast' else ''}" for k, tt, v in ev)
                 w.writerow([f"{t[j0]:.2f}", f"{t[i1]:.2f}", name(ga), name(gb), found, check, text])
-                print(f"  {t[j0]:6.1f}-{t[i1]:6.1f} s  gear {name(ga) or '?'} -> {name(gb) or '?'}  {text}" + (f"  !! {check}" if check else ""))
+                if frame_gear is None:      # with --fixes the stretches are resolved above (clutch lines)
+                    print(f"  {t[j0]:6.1f}-{t[i1]:6.1f} s  gear {name(ga) or '?'} -> {name(gb) or '?'}  {text}" + (f"  !! {check}" if check else ""))
     if readings and consts:
         err = [abs(speed[np.argmin(np.abs(t - (x - args.lag)))] - v) for x, v in readings]
         err = [e for e in err if not np.isnan(e)]
