@@ -453,7 +453,8 @@ def resolve_unclear(t, f0, ks, path, speed, pairs, segs, events=(), clicks=(), s
     windows. Where the throttle was closed in the stretch (coasting: clutch possibly
     pulled, shifts hidden), the gear after it is open too (-2..+1), for the following
     sure part up to its next gear change. A strong shift click (detect_clicks) opens a
-    stretch around it even where the pitch is steady, and a gear change chosen in a
+    stretch around it even where the pitch is steady - a weak one only where the speed
+    jumps next to it, so that a shift there could remove the jump - and a gear change chosen in a
     stretch with a click must happen there: the clutch window contains the click, or a
     shift without window follows it within 0.6 s. The stretches of an interval are combined by
     dynamic programming over the distance (1 m steps). Returns (speed, gear, clutch mask,
@@ -464,15 +465,25 @@ def resolve_unclear(t, f0, ks, path, speed, pairs, segs, events=(), clicks=(), s
     ks = np.asarray(ks)
     speed, path = speed.copy(), path.copy()
     clutch = np.zeros(len(t), bool)
+    w = int(0.5 / dt)
     sure = np.zeros(len(t), bool)
     for i, j in segs:
         if len(set(path[i:j + 1].tolist())) == 1:
             sure[i:j + 1] = True
     click_at = np.zeros(len(t), bool)
+    used_clicks = []
     for x, strength in clicks:
-        if strength >= strong:
-            click_at[np.argmin(np.abs(t - x))] = True
-            sure[(t >= x - 0.3) & (t <= x + 1.5)] = False     # a shift may be hidden here
+        i = int(np.argmin(np.abs(t - x)))
+        if strength < strong:
+            # a weak click counts only where a shift there would remove a speed jump next to it
+            # (also requiring the pitch to change by a gear step across it picked up smooth
+            # acceleration out of hairpins and made the cross-validation worse)
+            v_near = speed[(t > x - 0.5) & (t < x + 1.5)]
+            if not (len(v_near) > w and np.abs(v_near[w:] - v_near[:-w]).max() > 8):
+                continue
+        click_at[i] = True
+        sure[(t >= x - 0.3) & (t <= x + 1.5)] = False     # a shift may be hidden here
+        used_clicks.append((x, strength))
     notes = []
     w = int(0.5 / dt)
     coast = np.zeros(len(t), bool)
@@ -595,7 +606,7 @@ def resolve_unclear(t, f0, ks, path, speed, pairs, segs, events=(), clicks=(), s
             path[i0 + start:k_end] = g_out
             clutch[i0 + start:i0 + end] = True
             notes.append((float(t[i0]), float(t[i1]), int(g_in), int(g_out), float(t[i0 + start]), (end - start) * dt))
-    return speed, path, clutch, notes
+    return speed, path, clutch, notes, used_clicks
 
 
 def smooth_gear_changes(t, f0, ks, path, speed, clutch, window_s=1.0, tol=0.06):
@@ -714,8 +725,11 @@ def main():
         clicks = detect_clicks(video, start, end, find_ffmpeg(args.ffmpeg))
         print(f"  {len(clicks)} shift clicks heard, {sum(1 for _, s_ in clicks if s_ >= 0.33)} strong: "
               + ", ".join(f"{x:.1f}" for x, s_ in clicks if s_ >= 0.33) + " s")
-        speed_fixed, frame_gear, clutch, notes = resolve_unclear(
+        speed_fixed, frame_gear, clutch, notes, used_clicks = resolve_unclear(
             t, f0, consts, frame_gear, speed_from_path(t, f0, consts, frame_gear, valid), pairs, segs, events, clicks)
+        weak = [x for x, s_ in used_clicks if s_ < 0.33]
+        if weak:
+            print("  weak clicks used (speed jump next to them): " + ", ".join(f"{x:.1f}" for x in weak) + " s")
         # the speed follows the final gears; interpolated only in the clutch windows
         inside = speed_fixed.copy()
         speed_fixed = speed_from_path(t, f0, consts, frame_gear, valid)

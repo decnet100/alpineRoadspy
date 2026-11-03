@@ -136,6 +136,10 @@ abrupt broadband rises between 1.5 and 11 kHz, where the engine is low and
 steady (above ~12 kHz the compressed sound tracks of online videos are cut
 off). A strong click opens a stretch for the check above even where the
 pitch is steady, and a gear change chosen there must happen at the click.
+A weak click is used only where the speed jumps next to it, so that a shift
+there could remove the jump (also accepting a pitch change of about a gear
+step across it picked up smooth acceleration out of hairpins and made the
+cross-validation worse).
 On the Samnaun 2 ride all 9 strong clicks were shifts, including the one
 hidden by the clutch while braking in a tunnel; upshifts in the loud tunnel
 were not heard.
