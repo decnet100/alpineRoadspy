@@ -280,6 +280,15 @@ The server only binds to localhost and supports seeking in the video; the
 video never leaves the machine. A video can also be opened via the file
 dialog or drag & drop. Map tiles and the WFS fallback need internet access.
 
+### Waypoints (σ)
+
+The σ column says how exactly a fix is placed. A fix with σ above 15 m is only a
+**waypoint**: it steers the routing (e.g. a point somewhere in a featureless
+tunnel, without which the route would bypass it), but its time is no anchor.
+The picker fits timing and position over the whole stretch from the precise fix
+before to the one after, and marks the waypoint with ◇; `audio_speed.py` uses
+the distance between those two precise fixes as well (`--waypoint-sigma`).
+
 ### Exports (WGS84)
 
 - `<video>_fixes.csv` — the fixes:

@@ -46,6 +46,7 @@
   tr:hover td { background: #f3f8ff; }
   .warn { color: #c00; font-weight: 600; }
   .soft { color: #c62828; }
+  .muted { color: #999; }
   #status { padding: 4px 8px; color: #555; border-top: 1px solid #ddd; min-height: 1.3em; }
   #motionWrap { border-bottom: 1px solid #ddd; padding: 2px 8px 4px; }
   #motion { width: 100%; height: 130px; display: block; cursor: crosshair; }
@@ -354,6 +355,7 @@ function renderTable() {
     const dt = prev ? f.t - prev.t : null;
     const ds = prev ? (r ? r.path.length : dist(prev, f)) : null;
     const v = prev && dt > 0 && !cutBetween(prev.t, f.t) ? ds / dt * 3.6 : null;   // across a cut time was skipped
+    const way = isWaypoint(f, i, state.fixes), loose = way || (prev && isWaypoint(prev, i - 1, state.fixes));
     const tr = document.createElement('tr');
     if (f.id === state.selected) tr.className = 'sel';
     let road = '', roadTitle = '';
@@ -367,10 +369,10 @@ function renderTable() {
     const crossesCut = prev && cutBetween(prev.t, f.t);
     const wayTitle = (crossesCut ? '✂ Schnitt im Video dazwischen – keine Interpolation. ' : '') +
       (r ? (r.ok ? 'via ' + r.roads.join(' › ') : 'keine Verbindung im Straßennetz gefunden – Luftlinie') : 'Luftlinie');
-    tr.innerHTML = `<td>${i + 1}</td><td>${f.t.toFixed(3)}</td><td>${frameOf(f.t)}</td>
+    tr.innerHTML = `<td title="${way ? `Wegpunkt (σ > ${WAYPOINT_SIGMA} m): lenkt nur die Route, Zeit ist kein Anker` : ''}">${i + 1}${way ? ' ◇' : ''}</td><td>${f.t.toFixed(3)}</td><td>${frameOf(f.t)}</td>
       <td>${dt == null ? '' : dt.toFixed(1)}</td>
       <td class="${r && !r.ok ? 'soft' : ''}" title="${wayTitle}">${crossesCut ? '✂ ' : ''}${ds == null ? '' : (r && r.ok ? '' : '≈') + ds.toFixed(0)}</td>
-      <td class="${v != null && v > 130 ? 'warn' : ''}">${v == null ? '' : v.toFixed(0)}</td>
+      <td class="${loose ? 'muted' : v != null && v > 130 ? 'warn' : ''}" title="${loose ? 'neben einem Wegpunkt: Zeit dort ungenau' : ''}">${v == null ? '' : v.toFixed(0)}</td>
       <td>${routed && f.station != null ? f.station.toFixed(0) : ''}</td>
       <td class="road${f.cands > 1 ? ' cycle' : ''}" title="${roadTitle}"></td>
       <td><input class="sigma" type="number" min="0" step="any"></td>
@@ -380,7 +382,11 @@ function renderTable() {
     const [sigmaIn, noteIn] = tr.querySelectorAll('input');
     sigmaIn.value = f.sigma;
     noteIn.value = f.note;
-    sigmaIn.addEventListener('change', () => { f.sigma = parseFloat(sigmaIn.value) || 0; save(); });
+    sigmaIn.addEventListener('change', () => {
+      const was = isWaypoint(f, i, state.fixes);
+      f.sigma = parseFloat(sigmaIn.value) || 0;
+      if (was !== isWaypoint(f, i, state.fixes)) refresh(); else save();
+    });
     noteIn.addEventListener('change', () => { f.note = noteIn.value; save(); renderMarkers(); });
     tr.querySelector('button').addEventListener('click', (e) => { e.stopPropagation(); deleteFix(f.id); });
     tr.querySelector('td.road').addEventListener('click', (e) => { e.stopPropagation(); cycleRoad(f); });
@@ -524,6 +530,37 @@ function applyLaneMode(routes, fixes) {
   fixes.forEach((f, i) => { if (routes[i]?.ok || routes[i - 1]?.ok) f.offset = off; });
 }
 
+// A fix with a large σ only steers the routing (e.g. a point somewhere in a featureless tunnel):
+// its time is no anchor. The routes on both sides become one section from the precise fix before
+// to the one after, and timing and position run along that section.
+const WAYPOINT_SIGMA = 15;
+const isWaypoint = (f, i, fixes) => i > 0 && i < fixes.length - 1 && +f.sigma > WAYPOINT_SIGMA;
+function groupWaypoints(routes, fixes) {
+  for (let i = 0; i < routes.length;) {
+    let j = i;
+    while (j + 1 < routes.length && isWaypoint(fixes[j + 1], j + 1, fixes) && routes[j].ok && routes[j + 1].ok) j++;
+    if (j > i && !cutBetween(fixes[i].t, fixes[j + 1].t)) {
+      const coords = [];
+      for (let k = i; k <= j; k++) {
+        coords.push(...(coords.length ? routes[k].path.coords.slice(1) : routes[k].path.coords));
+      }
+      const g = { i0: i, i1: j, ok: true, path: new RoadNet.Path(coords), offA: routes[i].offA, offB: routes[j].offB };
+      for (let k = i; k <= j; k++) routes[k].group = g;
+    }
+    i = j + 1;
+  }
+}
+
+// sections between anchoring fixes: { r (route or waypoint group), a, b }
+function sections(routes, fixes) {
+  const out = [];
+  routes.forEach((r, i) => {
+    if (!r.group) out.push({ r, a: fixes[i], b: fixes[i + 1] });
+    else if (r.group.i0 === i) out.push({ r: r.group, a: fixes[i], b: fixes[r.group.i1 + 1] });
+  });
+  return out;
+}
+
 // Speed along each section (speedfit.js) from the turning - camera yaw from the image
 // (scale image width -> degrees fitted first with constant speed) or the turn rate from
 // lean and engine-sound speed (degrees directly, no scale) - and/or the engine-sound speed
@@ -531,7 +568,7 @@ function applyLaneMode(routes, fixes) {
 // Cross-validated on the Samnaun 2 ride (helmet camera, fixes every ~20-40 s): position error
 // at left-out fixes median 25 -> 5 m with lean + sound (90 %: 75 -> 22 m).
 function fitTimings(routes, fixes) {
-  routes.forEach((r) => { delete r.timing; delete r.timingMode; });
+  routes.forEach((r) => { delete r.timing; delete r.timingMode; if (r.group) { delete r.group.timing; delete r.group.timingMode; } });
   const curves = $('speedFromCurves').checked, source = $('turnSource').value;
   let turnAt = null, label = '';
   if (curves && source === 'lean' && drive.turn) {
@@ -548,8 +585,7 @@ function fitTimings(routes, fixes) {
   const vref = $('speedFromAudio').checked && drive.audio ? audioSpeedAt : null;
   if (!turnAt && !vref) return;
   const mode = [label, vref ? 'Ton' : ''].filter(Boolean).join(' + ');
-  routes.forEach((r, i) => {
-    const a = fixes[i], b = fixes[i + 1];
+  sections(routes, fixes).forEach(({ r, a, b }) => {
     if (!r.ok || b.t - a.t < 1 || r.path.length < 5 || cutBetween(a.t, b.t)) return;
     const theta = roadHeading(r.path);
     r.timing = SpeedFit.fitSection({ duration: b.t - a.t, length: r.path.length, thetaAt: theta,
@@ -576,8 +612,7 @@ function roadHeading(path) {
 // least squares scale between measured (image widths/s) and expected heading rate (deg/s) at constant speed
 function fitScale(routes, fixes) {
   let num = 0, den = 0, cnt = 0;
-  routes.forEach((r, i) => {
-    const a = fixes[i], b = fixes[i + 1];
+  sections(routes, fixes).forEach(({ r, a, b }) => {
     if (!r.ok || b.t - a.t < 1 || cutBetween(a.t, b.t)) return;
     const theta = roadHeading(r.path), v = r.path.length / (b.t - a.t);
     for (let t = a.t + 0.5; t < b.t - 0.5; t += 0.1) {
@@ -683,6 +718,7 @@ async function routeAll() {
     if (routes[i]) station += routes[i].path.length;
   });
   applyLaneMode(routes, fixes);
+  groupWaypoints(routes, fixes);
   fitTimings(routes, fixes);
   state.routes = routes;
   state.ext = buildExtension(fixes, routes);
@@ -702,14 +738,14 @@ function position(t) {
   if (t <= fx[fx.length - 1].t) {
     let i = 1;
     while (i < fx.length - 1 && fx[i].t < t) i++;
-    const a = fx[i - 1], b = fx[i];
+    let a = fx[i - 1], b = fx[i], r = routed ? routes[i - 1] : null;
+    if (r && r.group) { a = fx[r.group.i0]; b = fx[r.group.i1 + 1]; r = r.group; }   // across waypoints
     if (cutBetween(a.t, b.t)) return { cut: true };   // video jumps in between: position unknown
     const w = b.t > a.t ? (t - a.t) / (b.t - a.t) : 0;
     if (!routed) {
       return { lat: a.lat + w * (b.lat - a.lat), lon: a.lon + w * (b.lon - a.lon), mode: 'linear',
                speed: b.t > a.t ? dist(a, b) / (b.t - a.t) : 0 };
     }
-    const r = routes[i - 1];
     let s = w * r.path.length, speed = b.t > a.t ? r.path.length / (b.t - a.t) : 0;
     if (r.timing) { const q = SpeedFit.at(r.timing, t - a.t); s = q.s; speed = q.v; }
     const off = r.offA + (s / Math.max(r.path.length, 1e-9)) * (r.offB - r.offA);   // lateral offset, left positive

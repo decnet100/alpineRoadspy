@@ -286,11 +286,23 @@ def propagate(segs, gear, gaps):
     return gear
 
 
-def read_fixes(path):
-    """[(video_time_s, station_m)] from the fix picker's fixes export."""
+def read_fixes(path, waypoint_sigma=15.0):
+    """[(video_time_s, station_m)] from the fix picker's fixes export, and the number of waypoints left out.
+
+    A fix with sigma_m above waypoint_sigma only steers the routing (e.g. a point somewhere in a
+    featureless tunnel): its time is no anchor, the distance runs from the fix before to the one after.
+    """
+    fixes, waypoints = [], 0
     with open(path, newline="", encoding="utf-8") as f:
-        return sorted((float(r["video_time_s"]), float(r["station_m"])) for r in csv.DictReader(f)
-                      if r.get("station_m") not in (None, ""))
+        for r in csv.DictReader(f):
+            if r.get("station_m") in (None, ""):
+                continue
+            sigma = r.get("sigma_m")
+            if sigma not in (None, "") and float(sigma) > waypoint_sigma:
+                waypoints += 1
+                continue
+            fixes.append((float(r["video_time_s"]), float(r["station_m"])))
+    return sorted(fixes), waypoints
 
 
 def fix_octaves(t, f0, max_len_s=15.0):
@@ -706,6 +718,8 @@ def main():
     parser.add_argument("--min-drive-rpm", type=float, default=1800,
                         help="steady segments only above this engine speed (default 1800)")
     parser.add_argument("--fixes", help="fixes CSV from the fix picker: fit the gears from the distances between them")
+    parser.add_argument("--waypoint-sigma", type=float, default=15.0,
+                        help="fixes with a larger sigma_m are routing waypoints, not time anchors (default 15 m)")
     parser.add_argument("--readings", help="CSV time_s,speed_kmh (e.g. speedometer readings) to fit the gears")
     parser.add_argument("--lag", type=float, default=0.7, help="delay of the readings behind the sound, s (speedometer: 0.7)")
     parser.add_argument("--gear-step", type=float, default=0.79,
@@ -740,7 +754,9 @@ def main():
         ups = [r for k, _, r in events if k == "up"]
         fstep = float(np.median(ups)) if len(ups) >= 2 else args.gear_step
         events = find_events(t, f0, load, 0, len(t) - 1, fstep)
-        fixes = read_fixes(args.fixes)
+        fixes, waypoints = read_fixes(args.fixes, args.waypoint_sigma)
+        if waypoints:
+            print(f"  {waypoints} fix(es) with sigma above {args.waypoint_sigma:g} m only steer the route: no time anchor")
         consts, frame_gear, errors, used, valid = fit_from_fixes(t, f0, events, fixes, fstep)
         print(f"  gear step {fstep:.3f} from {len(ups)} upshifts; distance error between fixes: "
               f"median {np.median(np.abs(errors)):.0f} m, max {np.max(np.abs(errors)):.0f} m")
