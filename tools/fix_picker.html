@@ -91,7 +91,7 @@
     </div>
     <div class="bar">
       <label><input id="pickMode" type="checkbox" checked> Klick in Karte setzt Fixpunkt</label>
-      <label>σ <input id="sigmaDefault" type="number" min="0" step="any" value="5"> m</label>
+      <label>σ <input id="sigmaDefault" type="number" min="0" step="any" value="2.5"> m</label>
       <label>Straßennetz <select id="roadSource"></select></label>
       <label>Fangradius <input id="snapRadius" type="number" min="1" step="any" value="15"> m</label>
       <label title="Seitliche Lage der Kamera zur Straßenachse für Trajektorie und Objekte">Spurlage
@@ -254,7 +254,7 @@ function restore() {
 
 function setFixes(fixes) {
   state.fixes = fixes.map((f) => ({ id: state.nextId++, t: +f.t, lat: +f.lat, lon: +f.lon,
-                                   sigma: f.sigma === '' || f.sigma == null ? 5 : +f.sigma, note: f.note || '',
+                                   sigma: f.sigma === '' || f.sigma == null ? 2.5 : +f.sigma, note: f.note || '',
                                    snapIdx: +f.snapIdx || 0, snapManual: !!f.snapManual }));
   state.selected = null;
   refresh();
@@ -271,7 +271,7 @@ function addOrMoveFix(latlng) {
     Object.assign(fix, { lat: latlng.lat, lon: latlng.lng, snapIdx: 0, snapManual: false });
     status(`Fixpunkt bei ${t.toFixed(3)} s verschoben.`);
   } else {
-    fix = { id: state.nextId++, t, lat: latlng.lat, lon: latlng.lng, sigma: parseFloat($('sigmaDefault').value) || 5, note: '',
+    fix = { id: state.nextId++, t, lat: latlng.lat, lon: latlng.lng, sigma: parseFloat($('sigmaDefault').value) || 2.5, note: '',
             snapIdx: 0, snapManual: false };
     state.fixes.push(fix);
     status(`Fixpunkt bei ${t.toFixed(3)} s gesetzt.`);
