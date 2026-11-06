@@ -196,6 +196,29 @@ applied. About 1 s per video second and CPU core for 4K input; the video is
 split into one-minute parts processed in parallel (`--workers`, default: all
 cores but one).
 
+### Road roughness (experimental)
+
+```bash
+python tools/roughness.py videos/samnaun2.mp4
+```
+
+The helmet camera itself hardly shakes on a bumpy road (neck and helmet damp
+the jolts), but the motorcycle does: the instrument cluster shakes relative to
+the camera. `roughness.py` measures that in every frame (phase correlation of
+the largest cockpit box of the cockpit config, following the cockpit with the
+positions from `<video>_cockpit.csv`; run `cockpit.py` first, or the window
+stays where the box is in the reference frame and partly measures the road
+when the head turns). Shifts slower than 0.2 s (head movements) are removed;
+what is left, as RMS over 0.25 s, is the jitter. A second, independent sign is
+low rumble in the sound (20–60 Hz relative to the engine band, the engine's
+firing frequency left out, relative to the surrounding 30 s) – on its own it
+also comes from wind. Writes `data/roughness/<video>.csv` (10 rows/s: jitter,
+quality, rumble, speed, station and position from the trajectory) and a plot;
+the fix picker shows both as a chart and colours the route where the jitter
+is 1.5× / 2.5× its typical value on this ride. The values are relative –
+bumpier than elsewhere on this ride, with this motorcycle and camera – not a
+roughness index.
+
 ## Reviewing results
 
 ```bash

@@ -50,7 +50,7 @@
   #status { padding: 4px 8px; color: #555; border-top: 1px solid #ddd; min-height: 1.3em; }
   #motionWrap { border-bottom: 1px solid #ddd; padding: 2px 8px 4px; }
   #motion { width: 100%; height: 130px; display: block; cursor: crosshair; }
-  #speedChart { width: 100%; height: 70px; display: block; cursor: crosshair; }
+  #speedChart, #roughChart { width: 100%; height: 70px; display: block; cursor: crosshair; }
   #ovl { position: absolute; left: 0; top: 0; width: 100%; height: 100%; pointer-events: none; }
   #motionHead { display: flex; gap: 10px; align-items: center; font-size: 12px; color: #555; flex-wrap: wrap; }
   .lg { display: inline-block; width: 14px; height: 3px; vertical-align: middle; margin-right: 3px; }
@@ -128,6 +128,13 @@
         <span id="speedInfo"></span>
       </div>
       <canvas id="speedChart" hidden></canvas>
+      <div id="roughHead" hidden style="font-size:12px;color:#555" title="tools/roughness.py: Zittern des Cockpits gegenüber der Helmkamera und tiefes Rumpeln im Ton. Relative Werte: holpriger als anderswo auf dieser Fahrt.">
+        <span><span class="lg" style="background:#c62828"></span>Cockpit-Zittern</span>
+        <span><span class="lg" style="background:#1565c0"></span>Rumpeln (Ton)</span>
+        <label><input type="checkbox" id="showRough" checked> auf der Karte</label>
+        <span id="roughInfo"></span>
+      </div>
+      <canvas id="roughChart" hidden></canvas>
     </div>
     <details>
       <summary>Bedienung</summary>
@@ -189,6 +196,7 @@ const fixLayer = L.featureGroup();
 const routeLayer = L.featureGroup();
 const snapLayer = L.featureGroup();
 const extLayer = L.featureGroup();
+const roughLayer = L.featureGroup();
 const lineLayer = L.polyline([], { color: '#1565c0', weight: 2, opacity: 0.7, dashArray: '4 4' });
 const posMarker = L.circleMarker([0, 0], { radius: 7, color: '#fff', weight: 2, fillColor: '#e53935', fillOpacity: 1 });
 const overlays = {
@@ -197,6 +205,7 @@ const overlays = {
   'Route im Straßennetz': routeLayer,
   'Straßenbezug der Fixpunkte': snapLayer,
   'Extrapolation': extLayer,
+  'Unebenheit (Cockpit-Zittern)': roughLayer,
   'Fixpunkte': fixLayer,
   'Luftlinie zwischen Fixpunkten': lineLayer,
 };
@@ -204,7 +213,7 @@ const overlays = {
 const map = L.map('map', { zoomControl: true }).setView([47.2, 11.4], 11);
 const savedBase = localStorage.getItem('fixpicker:base');
 (baseLayers[savedBase] || baseLayers['AT · basemap.at Orthofoto']).addTo(map);
-[refLayer, routeLayer, extLayer, snapLayer, fixLayer].forEach((l) => l.addTo(map));
+[refLayer, routeLayer, extLayer, roughLayer, snapLayer, fixLayer].forEach((l) => l.addTo(map));
 L.control.layers(baseLayers, overlays, { collapsed: true }).addTo(map);
 L.control.scale({ imperial: false }).addTo(map);
 map.on('baselayerchange', (e) => localStorage.setItem('fixpicker:base', e.name));
@@ -342,6 +351,7 @@ function renderRoutes() {
     L.circleMarker([f.snap.lat, f.snap.lon], { radius: 3, color: '#2e7d32', fillOpacity: 1 }).addTo(snapLayer);
   });
   if (state.ext) L.polyline(state.ext.path.coords, { color: '#ef6c00', weight: 4, opacity: 0.7, dashArray: '8 6' }).addTo(extLayer);
+  renderRough();
 }
 
 function renderTable() {
@@ -819,7 +829,7 @@ async function fetchCsv(url) {
 }
 
 async function loadDrive(src, name) {
-  Object.assign(drive, { audio: null, cockpit: null, cfg: null, turn: null });
+  Object.assign(drive, { audio: null, cockpit: null, cfg: null, turn: null, rough: null });
   if (/^\//.test(src)) {
     const stem = stemOf(name), dir = src.replace(/[^/]*$/, '');
     try {
@@ -847,6 +857,15 @@ async function loadDrive(src, name) {
       const r = await fetch(`/data/cockpit/${stem}.json`);
       if (r.ok) drive.cfg = await r.json();
     } catch (err) { /* no cockpit config: no overlay */ }
+    try {
+      const rows = await fetchCsv(`/data/roughness/${stem}.csv`);
+      if (rows && rows.length) {
+        const col = (k) => Float64Array.from(rows, (r) => r[k] === '' || r[k] == null ? NaN : +r[k]);
+        const t = col('time_s'), q = col('quality'), j = col('jitter_px').map((v, i) => q[i] >= 0.5 ? v : NaN);
+        const ok = Array.from(j).filter(isFinite).sort((a, b) => a - b);
+        drive.rough = { t, j, rb: col('rumble_db'), median: ok.length ? ok[Math.floor(ok.length / 2)] : 1 };
+      }
+    } catch (err) { /* no roughness data */ }
   }
   buildLeanTurn();
   updateDriveUi();
@@ -878,7 +897,8 @@ function updateDriveUi() {
   $('turnSource').value = drive.turn && saved !== 'camera' ? 'lean' : 'camera';
   $('leanLegend').hidden = !drive.turn;
   $('speedHead').hidden = $('speedChart').hidden = !drive.audio;
-  const parts = [drive.audio && 'Motorton-Geschwindigkeit', drive.turn && 'Schräglage', drive.cockpit && drive.cfg && 'Cockpit'].filter(Boolean);
+  $('roughHead').hidden = $('roughChart').hidden = !drive.rough;
+  const parts = [drive.audio && 'Motorton-Geschwindigkeit', drive.turn && 'Schräglage', drive.cockpit && drive.cfg && 'Cockpit', drive.rough && 'Unebenheit'].filter(Boolean);
   if (parts.length) status(`Fahrdaten geladen: ${parts.join(', ')}.`);
 }
 
@@ -886,6 +906,7 @@ $('turnSource').onchange = () => { localStorage.setItem('fixpicker:turnSource', 
 $('speedFromAudio').onchange = () => { localStorage.setItem('fixpicker:speedFromAudio', $('speedFromAudio').checked ? '1' : '0'); $('speedFromAudio').blur(); scheduleRouting(); };
 $('speedFromAudio').checked = localStorage.getItem('fixpicker:speedFromAudio') !== '0';
 $('showCockpit').onchange = () => { $('showCockpit').blur(); drawOverlay(); };
+$('showRough').onchange = () => { $('showRough').blur(); renderRough(); };
 
 // cockpit parts found by cockpit.py, drawn over the video; lean as text
 function drawOverlay() {
@@ -963,6 +984,67 @@ function drawSpeedNow() {
   const a = audioSpeedAt(now) * 3.6;
   $('speedInfo').textContent = isFinite(a) ? `jetzt ${a.toFixed(0)} km/h (Ton)` : '';
 }
+// Roughness (tools/roughness.py): cockpit jitter relative to its median on this ride, and rumble
+const roughLevel = (j) => j / drive.rough.median;   // 1 = typical
+const roughColour = (lvl) => lvl < 1.5 ? '#2e7d32' : lvl < 2.5 ? '#f9a825' : '#c62828';
+
+// the route coloured by the cockpit jitter (maximum per 0.5 s), at the positions of the trajectory
+function renderRough() {
+  roughLayer.clearLayers();
+  const r = drive.rough;
+  if (!r || !$('showRough').checked || state.fixes.length < 2 || !state.routes.length) return;
+  let prev = null;
+  for (let i0 = 0; i0 < r.t.length; i0 += 5) {
+    let m = NaN;
+    for (let i = i0; i < Math.min(i0 + 5, r.t.length); i++) if (isFinite(r.j[i]) && !(r.j[i] <= m)) m = r.j[i];
+    const p = position(r.t[i0]);
+    const here = p && !p.cut && !p.mode.startsWith('extrapoliert') ? [p.lat, p.lon] : null;
+    if (prev && here && isFinite(prev.m)) {
+      const lvl = roughLevel(prev.m);
+      if (lvl >= 1.5) L.polyline([prev.ll, here], { color: roughColour(lvl), weight: lvl >= 2.5 ? 9 : 7, opacity: 0.85 })
+        .bindTooltip(`${prev.t.toFixed(1)} s: Zittern ${prev.m.toFixed(1)} px (${lvl.toFixed(1)}× typisch)`, { sticky: true })
+        .on('click', ((t) => () => { video.currentTime = t; })(prev.t))
+        .addTo(roughLayer);
+    }
+    prev = here ? { ll: here, m, t: r.t[i0] } : null;
+  }
+}
+
+function drawRoughNow() {
+  const cv = $('roughChart');
+  if (cv.hidden || !drive.rough) return;
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== W * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const r = drive.rough, now = video.currentTime || 0, half = parseFloat($('motionWin').value) / 2, t0 = now - half, step = 2 * half / W;
+  const at = (arr, t) => interpAt(r.t, arr, t);
+  // jitter as multiple of the typical value (0..4), rumble in dB (-10..+15) on the same height
+  const yj = (lvl) => H - 3 - Math.min(lvl, 4) / 4 * (H - 14), yr = (db) => H - 3 - (Math.max(-10, Math.min(15, db)) + 10) / 25 * (H - 14);
+  [[1.5, '#f9a825'], [2.5, '#c62828']].forEach(([lvl, c]) => { g.strokeStyle = c; g.globalAlpha = 0.35; g.beginPath(); g.moveTo(0, yj(lvl)); g.lineTo(W, yj(lvl)); g.stroke(); });
+  g.globalAlpha = 1;
+  g.fillStyle = '#888'; g.font = '10px system-ui'; g.fillText('4× typisch', 3, 10);
+  const line = (f, y, colour) => {
+    g.strokeStyle = colour; g.lineWidth = 1.2; g.beginPath();
+    let pen = false;
+    for (let x = 0; x <= W; x++) {
+      const v = f(t0 + x * step);
+      if (isFinite(v)) { pen ? g.lineTo(x, y(v)) : g.moveTo(x, y(v)); pen = true; } else pen = false;
+    }
+    g.stroke();
+  };
+  line((t) => at(r.rb, t), yr, '#1565c0');
+  line((t) => roughLevel(at(r.j, t)), yj, '#c62828');
+  g.strokeStyle = '#000'; g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.stroke();
+  const j = at(r.j, now), rb = at(r.rb, now);
+  $('roughInfo').textContent = isFinite(j) ? `jetzt ${roughLevel(j).toFixed(1)}× typisch` + (isFinite(rb) ? `, Rumpeln ${rb >= 0 ? '+' : ''}${rb.toFixed(0)} dB` : '') : '';
+}
+$('roughChart').addEventListener('click', (e) => {
+  const r = $('roughChart').getBoundingClientRect(), half = parseFloat($('motionWin').value) / 2;
+  video.currentTime = Math.max(0, video.currentTime - half + (e.clientX - r.left) / r.width * 2 * half);
+});
+
 $('speedChart').addEventListener('click', (e) => {
   const r = $('speedChart').getBoundingClientRect(), half = parseFloat($('motionWin').value) / 2;
   video.currentTime = Math.max(0, video.currentTime - half + (e.clientX - r.left) / r.width * 2 * half);
@@ -1094,6 +1176,7 @@ function drawMotionNow() {
   line(leanw, '#2e7d32', 1.5);
   g.strokeStyle = '#000'; g.lineWidth = 1; g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.stroke();
   drawSpeedNow();
+  drawRoughNow();
   $('motionInfo').textContent = !motion.t ? (drive.turn ? 'Drehrate aus Schräglage: ohne Eichung' : $('motionInfo').textContent)
     : motion.scale ? `Skalierung ${motion.scale.toFixed(0)}° je Bildbreite (aus den Daten)` : 'Skalierung geschätzt (67°) – mehr Fixpunkte setzen';
 }
