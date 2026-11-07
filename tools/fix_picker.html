@@ -869,7 +869,10 @@ async function loadDrive(src, name) {
         const t = col('time_s'), q = col('quality'), j = col('jitter_px').map((v, i) => q[i] >= 0.5 ? v : NaN);
         const med = (arr) => { const ok = Array.from(arr).filter(isFinite).sort((a, b) => a - b); return ok.length ? ok[Math.floor(ok.length / 2)] : 1; };
         const steady = col('steady'), p = col('pitch_px').map((v, i) => steady[i] === 1 ? v : NaN);
-        drive.rough = { t, j, p, rb: col('rumble_db'), median: med(j), pmedian: med(p) };
+        drive.rough = { t, j, p, rb: col('rumble_db'), median: med(j), pmedian: med(p), spots: [] };
+        const ev = await fetchCsv(`/data/roughness/${stem}_events.csv`).catch(() => null);
+        if (ev) drive.rough.spots = ev.map((e) => ({ t: +e.time_s, kind: e.kind, jitter: +e.jitter_level, rumble: +e.rumble_db,
+                                                    pitch: e.pitch_level === '' ? NaN : +e.pitch_level }));
       }
     } catch (err) { /* no roughness data */ }
   }
@@ -1025,6 +1028,18 @@ function renderRough() {
       }
     }
     prev = here ? { ll: here, lj, lp, t: r.t[i0] } : null;
+  }
+  // single spots where the sensors agree (roughness.py): filled = shaking and rumbling, ring = shaking only
+  for (const e of r.spots) {
+    const p = position(e.t);
+    if (!p || p.cut || p.mode.startsWith('extrapoliert')) continue;
+    const both = e.kind === 'both';
+    const text = `${e.t.toFixed(1)} s: ${both ? 'Zittern + Rumpeln' : 'nur Zittern'} – Zittern ${e.jitter.toFixed(1)}× typisch, ` +
+                 `Rumpeln ${e.rumble >= 0 ? '+' : ''}${e.rumble.toFixed(0)} dB` + (isFinite(e.pitch) ? `, Nicken ${e.pitch.toFixed(1)}×` : '') +
+                 (p.station != null ? ` · Station ${p.station.toFixed(0)} m` : '');
+    L.circleMarker([p.lat, p.lon], { radius: 4 + Math.min(e.jitter, 8), color: '#000', weight: 1.5,
+                                    fillColor: both ? '#c62828' : '#fff', fillOpacity: both ? 0.9 : 0.6 })
+      .bindTooltip(text).on('click', () => { video.currentTime = Math.max(0, e.t - 2); }).addTo(roughLayer);
   }
 }
 

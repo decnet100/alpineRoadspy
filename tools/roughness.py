@@ -256,6 +256,37 @@ def pitch(shifts, fps, t_out, speed, lean):
     return rms, st
 
 
+def find_events(t, jy, q, rb, pr, steady, jitter_min=2.5, rumble_min=5.0, alone_min=4.0):
+    """Single spots - humps, joints, potholes, edges - where the sensors agree.
+
+    'both': the cockpit jitter is at least jitter_min x its median on this ride and the sound
+    rumbles at least rumble_min dB within 0.5 s; 'jitter': the jitter alone is at least
+    alone_min x (quieter spots, e.g. a joint in a tunnel). Peaks closer than 1 s are one spot.
+    Returns [(index of the peak, kind, jitter level, rumble dB, pitch level or nan)]."""
+    from scipy.ndimage import maximum_filter1d
+
+    ok = np.isfinite(jy) & (q >= 0.5)
+    if not ok.any():
+        return [], 1.0
+    median = float(np.median(jy[ok]))
+    level = np.where(ok, jy / median, 0.0)
+    near = round(0.5 * OUT_RATE)
+    rmax = maximum_filter1d(np.nan_to_num(rb, nan=-99.0), 2 * near + 1, mode="nearest")
+    both = (level >= jitter_min) & (rmax >= rumble_min)
+    alone = (level >= alone_min) & ~both
+    cand = np.flatnonzero(both | alone)
+    pmed = np.nanmedian(np.where(steady, pr, np.nan)) if np.any(steady) else np.nan
+    plevel = np.where(steady, pr / pmed, np.nan) if np.isfinite(pmed) else np.full(len(t), np.nan)
+    out = []
+    for g in np.split(cand, np.flatnonzero(np.diff(cand) > OUT_RATE) + 1) if len(cand) else []:
+        i = g[np.argmax(level[g])]
+        kind = "both" if both[g].any() else "jitter"
+        lo, hi = max(0, i - OUT_RATE), min(len(t), i + OUT_RATE + 1)
+        pl = np.nanmax(plevel[lo:hi]) if np.isfinite(plevel[lo:hi]).any() else np.nan
+        out.append((i, kind, level[i], rmax[i], pl))
+    return out, median
+
+
 def rumble(video, ffmpeg, start, end, t_out, engine):
     """Low band (20-60 Hz) over engine band (120-400 Hz) in dB, relative to the surrounding 30 s."""
     from scipy.ndimage import median_filter
@@ -306,6 +337,8 @@ def read_trajectory(stem):
         return None
     with open(path, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
+    # after the last fix the picker extrapolates: no place there
+    rows = [r for r in rows if not (r.get("mode") or "").startswith("extrapoliert")]
     col = lambda k: np.array([float(r[k]) if r.get(k) not in (None, "") else np.nan for r in rows])
     return path, col("video_time_s"), col("station_m"), col("lat"), col("lon")
 
@@ -343,6 +376,11 @@ def main():
     parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     parser.add_argument("--ffmpeg")
     parser.add_argument("--out", help="output CSV (default data/roughness/<video>.csv)")
+    parser.add_argument("--jitter-min", type=float, default=2.5,
+                        help="spot: jitter at least this multiple of its median, with rumble (default 2.5)")
+    parser.add_argument("--rumble-min", type=float, default=5.0, help="spot: rumble at least this many dB (default 5)")
+    parser.add_argument("--alone-min", type=float, default=4.0,
+                        help="spot without rumble: jitter at least this multiple of its median (default 4)")
     parser.add_argument("--reuse", action="store_true",
                         help="take the frame shifts of the last run (<out>_shifts.npz) instead of decoding the video again")
     args = parser.parse_args()
@@ -408,16 +446,21 @@ def main():
 
     ok = np.isfinite(jy) & (q >= 0.5)
     if ok.any():
-        calm = np.percentile(jy[ok], 50)
-        rough = ok & (jy > 3 * calm) & (rb > 3)
-        print(f"  jitter median {calm:.1f} px, 95 % {np.percentile(jy[ok], 95):.1f} px; "
+        print(f"  jitter median {np.median(jy[ok]):.1f} px, 95 % {np.percentile(jy[ok], 95):.1f} px; "
               f"{100 * (1 - ok.mean()):.0f} % of the time not measurable (cockpit out of view, light change)")
-        if rough.any():
-            # stretches where the jitter is 3x the median and the sound rumbles as well
-            idx = np.flatnonzero(rough)
-            groups = np.split(idx, np.flatnonzero(np.diff(idx) > OUT_RATE) + 1)
-            print("  shaking and rumbling: " + ", ".join(f"{t_out[g[0]]:.1f}-{t_out[g[-1]]:.1f} s" for g in groups))
-    print(f"  -> {out}")
+    found, _ = find_events(t_out, jy, q, rb, pr, steady, args.jitter_min, args.rumble_min, args.alone_min)
+    ev_path = out.with_name(out.stem + "_events.csv")
+    with open(ev_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["time_s", "kind", "jitter_level", "rumble_db", "pitch_level", "speed_kmh", "station_m", "lat", "lon"])
+        for i, kind, lvl, rdb, pl in found:
+            w.writerow([f"{t_out[i]:.1f}", kind, f"{lvl:.1f}", f"{rdb:.1f}", fmt(pl, 1), fmt(v[i] if v is not None else None, 1),
+                        fmt(place[0][i], 1), fmt(place[1][i], 7), fmt(place[2][i], 7)])
+    for kind, label in (("both", "shaking and rumbling"), ("jitter", "shaking only")):
+        sel = [e for e in found if e[1] == kind]
+        if sel:
+            print(f"  {label}: " + ", ".join(f"{t_out[i]:.1f} s ({lvl:.1f}x)" for i, _, lvl, _, _ in sel))
+    print(f"  -> {out}, {ev_path.name} ({len(found)} spots)")
 
 
 if __name__ == "__main__":

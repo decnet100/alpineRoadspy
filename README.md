@@ -228,8 +228,19 @@ steady (|acceleration| < 0.5 m/s² from the engine-sound speed, lean < 8°). The
 frame shifts are kept (`<video>_shifts.npz`); `--reuse` recomputes the
 measures without decoding again.
 
+**Spots** (`<video>_events.csv`): single humps, joints, potholes and edges,
+where the sensors agree – the jitter at least 2.5× its median on the ride and
+the sound rumbling at least +5 dB within 0.5 s (`both`), or the jitter alone
+at least 4× (`jitter`, quieter spots such as a joint in a tunnel); thresholds
+`--jitter-min`, `--rumble-min`, `--alone-min`. Each with time, strengths,
+station and position (where the trajectory is not extrapolated). The fix
+picker draws them as points (filled: both, ring: jitter only); a click jumps
+to just before the spot.
+
 On the Samnaun 2 ride both measures rank the unpaved construction site
-(480–516 s) and the speed hump (≈ 1000 s) highest. The values are relative –
+(480–516 s) and the speed humps (591 s, ≈ 1000 s) highest; the pitch also
+reacts to the rider's head nodding and is less reliable than jitter and
+rumble. The values are relative –
 bumpier than elsewhere on this ride, with this motorcycle and camera – not a
 roughness index.
 
