@@ -23,7 +23,7 @@ const SpeedFit = (() => {
     for (let j = 0; j <= M; j++) th[j] = thetaAt(j * cell) - th0;
     const vid = new Float64Array(N + 1);
     if (turnAt) {
-      const v0 = turnAt(0), endFix = th[M] - (turnAt(duration) - v0);
+      const v0 = turnAt(0), v1 = turnAt(duration), endFix = isFinite(v0) && isFinite(v1) ? th[M] - (v1 - v0) : NaN;
       for (let i = 0; i <= N; i++) vid[i] = turnAt(i * duration / N) - v0 + endFix * i / N;
     }
     // expected cells per time step: the mean, or the speed reference scaled to the section
@@ -55,7 +55,7 @@ const SpeedFit = (() => {
           if (c < next[j]) { next[j] = c; back[row + j] = k; }
         }
       }
-      if (turnAt) for (let j = 0; j <= M; j++) { const d = th[j] - vid[i]; next[j] += d * d; }
+      if (turnAt && isFinite(vid[i])) for (let j = 0; j <= M; j++) { const d = th[j] - vid[i]; next[j] += d * d; }   // no turn data: reference alone
       [cost, next] = [next, cost];
     }
     const steps = new Int32Array(N + 1);

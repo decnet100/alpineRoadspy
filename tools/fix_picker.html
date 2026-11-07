@@ -130,8 +130,9 @@
       <canvas id="speedChart" hidden></canvas>
       <div id="roughHead" hidden style="font-size:12px;color:#555" title="tools/roughness.py: Zittern des Cockpits gegenüber der Helmkamera und tiefes Rumpeln im Ton. Relative Werte: holpriger als anderswo auf dieser Fahrt.">
         <span><span class="lg" style="background:#c62828"></span>Cockpit-Zittern</span>
+        <span title="Nicken des Motorrads (0,7–4 Hz: Wellen, Kuppen, Senken), nur bei gleichmäßiger Fahrt auf geraden Stücken"><span class="lg" style="background:#6a1b9a"></span>Nicken</span>
         <span><span class="lg" style="background:#1565c0"></span>Rumpeln (Ton)</span>
-        <label><input type="checkbox" id="showRough" checked> auf der Karte</label>
+        <label>Karte <select id="showRough"><option value="both">Zittern + Nicken</option><option value="jitter">Zittern</option><option value="pitch">Nicken</option><option value="off">aus</option></select></label>
         <span id="roughInfo"></span>
       </div>
       <canvas id="roughChart" hidden></canvas>
@@ -595,15 +596,19 @@ function fitTimings(routes, fixes) {
   const vref = $('speedFromAudio').checked && drive.audio ? audioSpeedAt : null;
   if (!turnAt && !vref) return;
   const mode = [label, vref ? 'Ton' : ''].filter(Boolean).join(' + ');
+  // lean data (cockpit.py) may cover only part of the video: outside it the sound alone
+  const turnCovers = (t0, t1) => label !== 'Schräglage' || (t0 >= drive.turn.t[0] && t1 <= drive.turn.t[drive.turn.t.length - 1]);
   sections(routes, fixes).forEach(({ r, a, b }) => {
     if (!r.ok || b.t - a.t < 1 || r.path.length < 5 || cutBetween(a.t, b.t)) return;
+    const turn = turnAt && turnCovers(a.t, b.t) ? turnAt : null;
+    if (!turn && !vref) return;
     const theta = roadHeading(r.path);
     r.timing = SpeedFit.fitSection({ duration: b.t - a.t, length: r.path.length, thetaAt: theta,
-                                     turnAt: turnAt ? (t) => turnAt(a.t + t) : null,
+                                     turnAt: turn ? (t) => turn(a.t + t) : null,
                                      vrefAt: vref ? (t) => vref(a.t + t) : null,
-                                     mu: vref && turnAt ? 10000 : 300,
+                                     mu: vref && turn ? 10000 : 300,
                                      vmax: (parseFloat($('vmax').value) || 110) / 3.6 });
-    r.timingMode = `aus ${mode}`;
+    r.timingMode = `aus ${turn ? mode : 'Ton'}`;
   });
 }
 
@@ -862,8 +867,9 @@ async function loadDrive(src, name) {
       if (rows && rows.length) {
         const col = (k) => Float64Array.from(rows, (r) => r[k] === '' || r[k] == null ? NaN : +r[k]);
         const t = col('time_s'), q = col('quality'), j = col('jitter_px').map((v, i) => q[i] >= 0.5 ? v : NaN);
-        const ok = Array.from(j).filter(isFinite).sort((a, b) => a - b);
-        drive.rough = { t, j, rb: col('rumble_db'), median: ok.length ? ok[Math.floor(ok.length / 2)] : 1 };
+        const med = (arr) => { const ok = Array.from(arr).filter(isFinite).sort((a, b) => a - b); return ok.length ? ok[Math.floor(ok.length / 2)] : 1; };
+        const steady = col('steady'), p = col('pitch_px').map((v, i) => steady[i] === 1 ? v : NaN);
+        drive.rough = { t, j, p, rb: col('rumble_db'), median: med(j), pmedian: med(p) };
       }
     } catch (err) { /* no roughness data */ }
   }
@@ -906,7 +912,8 @@ $('turnSource').onchange = () => { localStorage.setItem('fixpicker:turnSource', 
 $('speedFromAudio').onchange = () => { localStorage.setItem('fixpicker:speedFromAudio', $('speedFromAudio').checked ? '1' : '0'); $('speedFromAudio').blur(); scheduleRouting(); };
 $('speedFromAudio').checked = localStorage.getItem('fixpicker:speedFromAudio') !== '0';
 $('showCockpit').onchange = () => { $('showCockpit').blur(); drawOverlay(); };
-$('showRough').onchange = () => { $('showRough').blur(); renderRough(); };
+$('showRough').value = localStorage.getItem('fixpicker:showRough') || 'both';
+$('showRough').onchange = () => { localStorage.setItem('fixpicker:showRough', $('showRough').value); $('showRough').blur(); renderRough(); };
 
 // cockpit parts found by cockpit.py, drawn over the video; lean as text
 function drawOverlay() {
@@ -986,27 +993,38 @@ function drawSpeedNow() {
 }
 // Roughness (tools/roughness.py): cockpit jitter relative to its median on this ride, and rumble
 const roughLevel = (j) => j / drive.rough.median;   // 1 = typical
+const pitchLevel = (p) => p / drive.rough.pmedian;
 const roughColour = (lvl) => lvl < 1.5 ? '#2e7d32' : lvl < 2.5 ? '#f9a825' : '#c62828';
 
-// the route coloured by the cockpit jitter (maximum per 0.5 s), at the positions of the trajectory
+// the route coloured by the cockpit jitter and/or the pitching (maximum per 0.5 s, as multiple
+// of the typical value), at the positions of the trajectory
 function renderRough() {
   roughLayer.clearLayers();
-  const r = drive.rough;
-  if (!r || !$('showRough').checked || state.fixes.length < 2 || !state.routes.length) return;
+  const r = drive.rough, mode = $('showRough').value;
+  if (!r || mode === 'off' || state.fixes.length < 2 || !state.routes.length) return;
   let prev = null;
   for (let i0 = 0; i0 < r.t.length; i0 += 5) {
-    let m = NaN;
-    for (let i = i0; i < Math.min(i0 + 5, r.t.length); i++) if (isFinite(r.j[i]) && !(r.j[i] <= m)) m = r.j[i];
+    let lj = NaN, lp = NaN;
+    for (let i = i0; i < Math.min(i0 + 5, r.t.length); i++) {
+      const a = roughLevel(r.j[i]), b = pitchLevel(r.p[i]);
+      if (isFinite(a) && !(a <= lj)) lj = a;
+      if (isFinite(b) && !(b <= lp)) lp = b;
+    }
+    if (mode === 'jitter') lp = NaN;
+    if (mode === 'pitch') lj = NaN;
     const p = position(r.t[i0]);
     const here = p && !p.cut && !p.mode.startsWith('extrapoliert') ? [p.lat, p.lon] : null;
-    if (prev && here && isFinite(prev.m)) {
-      const lvl = roughLevel(prev.m);
-      if (lvl >= 1.5) L.polyline([prev.ll, here], { color: roughColour(lvl), weight: lvl >= 2.5 ? 9 : 7, opacity: 0.85 })
-        .bindTooltip(`${prev.t.toFixed(1)} s: Zittern ${prev.m.toFixed(1)} px (${lvl.toFixed(1)}× typisch)`, { sticky: true })
-        .on('click', ((t) => () => { video.currentTime = t; })(prev.t))
-        .addTo(roughLayer);
+    if (prev && here) {
+      const lvl = Math.max(isFinite(prev.lj) ? prev.lj : 0, isFinite(prev.lp) ? prev.lp : 0);
+      if (lvl >= 1.5) {
+        const parts = [isFinite(prev.lj) && `Zittern ${prev.lj.toFixed(1)}×`, isFinite(prev.lp) && `Nicken ${prev.lp.toFixed(1)}×`].filter(Boolean);
+        L.polyline([prev.ll, here], { color: roughColour(lvl), weight: lvl >= 2.5 ? 9 : 7, opacity: 0.85 })
+          .bindTooltip(`${prev.t.toFixed(1)} s: ${parts.join(', ')} typisch`, { sticky: true })
+          .on('click', ((t) => () => { video.currentTime = t; })(prev.t))
+          .addTo(roughLayer);
+      }
     }
-    prev = here ? { ll: here, m, t: r.t[i0] } : null;
+    prev = here ? { ll: here, lj, lp, t: r.t[i0] } : null;
   }
 }
 
@@ -1035,10 +1053,12 @@ function drawRoughNow() {
     g.stroke();
   };
   line((t) => at(r.rb, t), yr, '#1565c0');
+  line((t) => pitchLevel(at(r.p, t)), yj, '#6a1b9a');
   line((t) => roughLevel(at(r.j, t)), yj, '#c62828');
   g.strokeStyle = '#000'; g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, H); g.stroke();
-  const j = at(r.j, now), rb = at(r.rb, now);
-  $('roughInfo').textContent = isFinite(j) ? `jetzt ${roughLevel(j).toFixed(1)}× typisch` + (isFinite(rb) ? `, Rumpeln ${rb >= 0 ? '+' : ''}${rb.toFixed(0)} dB` : '') : '';
+  const j = at(r.j, now), p = at(r.p, now), rb = at(r.rb, now);
+  $('roughInfo').textContent = [isFinite(j) && `Zittern ${roughLevel(j).toFixed(1)}×`, isFinite(p) && `Nicken ${pitchLevel(p).toFixed(1)}×`,
+                                isFinite(rb) && `Rumpeln ${rb >= 0 ? '+' : ''}${rb.toFixed(0)} dB`].filter(Boolean).join(', ');
 }
 $('roughChart').addEventListener('click', (e) => {
   const r = $('roughChart').getBoundingClientRect(), half = parseFloat($('motionWin').value) / 2;

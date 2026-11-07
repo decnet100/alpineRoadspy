@@ -214,8 +214,22 @@ low rumble in the sound (20–60 Hz relative to the engine band, the engine's
 firing frequency left out, relative to the surrounding 30 s) – on its own it
 also comes from wind. Writes `data/roughness/<video>.csv` (10 rows/s: jitter,
 quality, rumble, speed, station and position from the trajectory) and a plot;
-the fix picker shows both as a chart and colours the route where the jitter
-is 1.5× / 2.5× its typical value on this ride. The values are relative –
+the fix picker shows them as a chart and colours the route where the jitter
+or the pitch is 1.5× / 2.5× its typical value on this ride.
+
+The jitter covers about 5–30 Hz – potholes, joints, patches, cobbles. Longer
+waves (crests, dips, settlements; 1–3 Hz at 40–60 km/h, wavelengths of about
+4–17 m) come out as **pitch**: the vertical shift of the scene above the cockpit
+minus that of the cockpit (turning the head moves both alike), band-passed to
+0.7–4 Hz. It includes the rider's body moving up and down relative to the
+motorcycle, also a response to the road. Braking, accelerating and turning at
+a lean pitch the image as well, so it is only used where the driving is
+steady (|acceleration| < 0.5 m/s² from the engine-sound speed, lean < 8°). The
+frame shifts are kept (`<video>_shifts.npz`); `--reuse` recomputes the
+measures without decoding again.
+
+On the Samnaun 2 ride both measures rank the unpaved construction site
+(480–516 s) and the speed hump (≈ 1000 s) highest. The values are relative –
 bumpier than elsewhere on this ride, with this motorcycle and camera – not a
 roughness index.
 
